@@ -1,0 +1,25 @@
+# Node modules
+node_modules/
+
+# Build output
+dist/
+
+# Local environment
+.env
+.env.*
+
+# macOS
+.DS_Store
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Optional editors
+.idea/
+.vscode/
+*.swp
+
+# Optional OS junk
+Thumbs.db
