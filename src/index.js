@@ -19,6 +19,18 @@ import * as ed from "@noble/ed25519";
 import { sha512 } from "@noble/hashes/sha512";
 import CJSON from "canonical-json";
 
+// Helper: Normalize raw entitlement payloads into a consistent shape
+function parseActiveEntitlements(payload = {}) {
+  const raw = payload.active_ents || payload.active_entitlements || [];
+  return raw.map((e) => ({
+    key: e.key,
+    name: e.name ?? null,
+    description: e.description ?? null,
+    expires_at: e.expires_at ?? null,
+    metadata: e.metadata ?? null,
+  }));
+}
+
 class LicenseSeatSDK {
   constructor(config = {}) {
     this.config = {
@@ -234,8 +246,21 @@ class LicenseSeatSDK {
         },
       });
 
-      // Always update cache with latest validation, regardless of validity
+      // ------------------------------------------------------------------
+      // Preserve previously-cached entitlement information if the server
+      // response omits it (e.g. older backend versions or partial payloads).
+      // ------------------------------------------------------------------
       const cachedLicense = this.cache.getLicense();
+      if (
+        (!response.active_entitlements ||
+          response.active_entitlements.length === 0) &&
+        cachedLicense?.validation?.active_entitlements?.length
+      ) {
+        response.active_entitlements =
+          cachedLicense.validation.active_entitlements;
+      }
+
+      // Always update cache with latest validation, regardless of validity
       if (cachedLicense && cachedLicense.license_key === licenseKey) {
         this.cache.updateValidation(response);
       }
@@ -1008,6 +1033,19 @@ class LicenseSeatSDK {
         kid: offline.kid || offline.payload?.kid,
         exp_at: offline.payload?.exp_at,
       });
+
+      // Immediately verify the freshly-cached assets so UI reflects entitlements
+      // without waiting for the next validation cycle.
+      const res = await this.quickVerifyCachedOfflineLocal();
+      if (res) {
+        this.cache.updateValidation(res);
+        this.emit(
+          res.valid
+            ? "validation:offline-success"
+            : "validation:offline-failed",
+          res
+        );
+      }
     } catch (err) {
       this.log("Failed to sync offline assets:", err);
     }
@@ -1089,7 +1127,12 @@ class LicenseSeatSDK {
       // If offline-valid, but clock was ahead (now > lastSeen), update lastSeen baseline so we don't oscillate.
       this.cache.setLastSeenTimestamp(now);
 
-      return { valid: true, offline: true };
+      const active = parseActiveEntitlements(payload);
+      return {
+        valid: true,
+        offline: true,
+        ...(active.length ? { active_entitlements: active } : {}),
+      };
     } catch (e) {
       return { valid: false, offline: true, reason_code: "verification_error" };
     }
@@ -1127,9 +1170,20 @@ class LicenseSeatSDK {
 
     try {
       const ok = await this.verifyOfflineLicense(signed, pub);
-      return ok
-        ? { valid: true, offline: true }
-        : { valid: false, offline: true, reason_code: "signature_invalid" };
+      if (!ok) {
+        return {
+          valid: false,
+          offline: true,
+          reason_code: "signature_invalid",
+        };
+      }
+
+      const active = parseActiveEntitlements(signed.payload || {});
+      return {
+        valid: true,
+        offline: true,
+        ...(active.length ? { active_entitlements: active } : {}),
+      };
     } catch (_) {
       return { valid: false, offline: true, reason_code: "verification_error" };
     }
