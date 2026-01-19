@@ -336,12 +336,19 @@ describe("LicenseSeatSDK", () => {
       expect(result.authenticated).toBe(true);
     });
 
-    it("should throw when API key is not configured", async () => {
+    it("should throw ConfigurationError when API key is not configured", async () => {
       const noAuthSdk = new LicenseSeatSDK({ autoInitialize: false });
 
       await expect(noAuthSdk.testAuth()).rejects.toThrow(
         "API key is required for auth test"
       );
+
+      // Verify it's specifically a ConfigurationError
+      try {
+        await noAuthSdk.testAuth();
+      } catch (err) {
+        expect(err.name).toBe("ConfigurationError");
+      }
     });
   });
 });

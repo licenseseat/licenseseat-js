@@ -21,7 +21,7 @@ import * as ed from "@noble/ed25519";
 import { sha512 } from "@noble/hashes/sha512";
 
 import { LicenseCache } from "./cache.js";
-import { APIError, LicenseError, CryptoError } from "./errors.js";
+import { APIError, ConfigurationError, LicenseError, CryptoError } from "./errors.js";
 import {
   parseActiveEntitlements,
   constantTimeEqual,
@@ -98,7 +98,7 @@ export class LicenseSeatSDK {
 
     /**
      * Auto-validation timer ID
-     * @type {number|null}
+     * @type {ReturnType<typeof setInterval>|null}
      * @private
      */
     this.validationTimer = null;
@@ -126,14 +126,14 @@ export class LicenseSeatSDK {
 
     /**
      * Connectivity polling timer ID
-     * @type {number|null}
+     * @type {ReturnType<typeof setInterval>|null}
      * @private
      */
     this.connectivityTimer = null;
 
     /**
      * Offline license refresh timer ID
-     * @type {number|null}
+     * @type {ReturnType<typeof setInterval>|null}
      * @private
      */
     this.offlineRefreshTimer = null;
@@ -637,12 +637,12 @@ export class LicenseSeatSDK {
    * Test server authentication
    * Useful for verifying API key/session is valid.
    * @returns {Promise<Object>} Result from the server
-   * @throws {Error} When API key is not configured
+   * @throws {ConfigurationError} When API key is not configured
    * @throws {APIError} When authentication fails
    */
   async testAuth() {
     if (!this.config.apiKey) {
-      const err = new Error("API key is required for auth test");
+      const err = new ConfigurationError("API key is required for auth test");
       this.emit("auth_test:error", { error: err });
       throw err;
     }

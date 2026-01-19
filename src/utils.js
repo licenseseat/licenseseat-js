@@ -66,6 +66,7 @@ export function canonicalJsonStringify(obj) {
 
 /**
  * Decode a Base64URL string to a Uint8Array
+ * Works in both browser and Node.js environments.
  * @param {string} base64UrlString - The Base64URL encoded string
  * @returns {Uint8Array} Decoded bytes
  */
@@ -74,7 +75,20 @@ export function base64UrlDecode(base64UrlString) {
   while (base64.length % 4) {
     base64 += "=";
   }
-  const raw = window.atob(base64);
+
+  // Cross-platform base64 decoding
+  /** @type {string} */
+  let raw;
+  if (typeof atob === "function") {
+    // Browser environment (or Node.js 16+ with global atob)
+    raw = atob(base64);
+  } else if (typeof Buffer !== "undefined") {
+    // Node.js environment
+    raw = Buffer.from(base64, "base64").toString("binary");
+  } else {
+    throw new Error("No base64 decoder available (neither atob nor Buffer found)");
+  }
+
   const outputArray = new Uint8Array(raw.length);
   for (let i = 0; i < raw.length; ++i) {
     outputArray[i] = raw.charCodeAt(i);
@@ -115,10 +129,19 @@ export function getCanvasFingerprint() {
 }
 
 /**
- * Generate a unique device identifier based on browser characteristics
- * @returns {string} Unique device identifier
+ * Generate a stable device identifier based on browser characteristics.
+ * The ID is deterministic - same device will produce the same ID across calls.
+ * @returns {string} Stable device identifier
  */
 export function generateDeviceId() {
+  // Check if we're in a browser environment
+  if (typeof window === "undefined" || typeof navigator === "undefined") {
+    // Node.js or non-browser environment - use a fallback
+    const os = typeof process !== "undefined" ? process.platform : "unknown";
+    const arch = typeof process !== "undefined" ? process.arch : "unknown";
+    return `node-${hashCode(os + "|" + arch)}`;
+  }
+
   const nav = window.navigator;
   const screen = window.screen;
   const data = [
@@ -131,7 +154,8 @@ export function generateDeviceId() {
     getCanvasFingerprint(),
   ].join("|");
 
-  return `web-${hashCode(data)}-${Date.now().toString(36)}`;
+  // Stable ID without timestamp - same device produces same ID
+  return `web-${hashCode(data)}`;
 }
 
 /**

@@ -62,6 +62,7 @@
     "node": ">=18.0.0"
   },
   "devDependencies": {
+    "@types/node": "^25.0.9",
     "@vitest/coverage-v8": "^1.6.0",
     "esbuild": "^0.20.2",
     "jsdom": "^24.1.3",
