@@ -7,7 +7,7 @@
 /**
  * SDK Configuration options
  * @typedef {Object} LicenseSeatConfig
- * @property {string} [apiBaseUrl="https://api.licenseseat.com"] - Base URL for the LicenseSeat API
+ * @property {string} [apiBaseUrl="https://licenseseat.com/api"] - Base URL for the LicenseSeat API
  * @property {string} [apiKey] - API key for authentication (required for most operations)
  * @property {string} [storagePrefix="licenseseat_"] - Prefix for localStorage keys
  * @property {number} [autoValidateInterval=3600000] - Interval in ms for automatic license validation (default: 1 hour)
@@ -60,10 +60,9 @@
 
 /**
  * Entitlement object
+ * Note: API returns only key, expires_at, and metadata. Name/description are not provided.
  * @typedef {Object} Entitlement
  * @property {string} key - Unique entitlement key
- * @property {string|null} name - Human-readable name
- * @property {string|null} description - Description of the entitlement
  * @property {string|null} expires_at - ISO8601 expiration timestamp
  * @property {Object|null} metadata - Additional metadata
  */
@@ -103,11 +102,15 @@
 /**
  * Offline license payload
  * @typedef {Object} OfflineLicensePayload
+ * @property {number} [v] - Payload version (currently 1)
  * @property {string} [lic_k] - License key
- * @property {string} [exp_at] - ISO8601 expiration timestamp
- * @property {string} [kid] - Key ID for signature verification
- * @property {Array<Object>} [active_ents] - Active entitlements
- * @property {Array<Object>} [active_entitlements] - Active entitlements (alternative key)
+ * @property {string} [prod_s] - Product slug
+ * @property {string} [plan_k] - License plan key
+ * @property {string|null} [exp_at] - ISO8601 expiration timestamp (null for perpetual)
+ * @property {number|null} [sl] - Seat limit (null for unlimited)
+ * @property {string} [kid] - Key ID for public key lookup
+ * @property {Array<{key: string, expires_at: string|null, metadata: Object|null}>} [active_ents] - Active entitlements
+ * @property {Array<{key: string, expires_at: string|null, metadata: Object|null}>} [active_entitlements] - Active entitlements (alternative key)
  * @property {Object} [metadata] - Additional metadata
  */
 
@@ -136,7 +139,8 @@
  * API Error data
  * @typedef {Object} APIErrorData
  * @property {string} [error] - Error message
- * @property {string} [code] - Error code
+ * @property {string} [reason_code] - Machine-readable reason code (e.g., "license_not_found", "expired", "revoked")
+ * @property {string} [code] - Legacy error code (deprecated, use reason_code)
  * @property {Object} [details] - Additional error details
  */
 

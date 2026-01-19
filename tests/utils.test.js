@@ -17,8 +17,6 @@ describe("Utility Functions", () => {
         active_ents: [
           {
             key: "pro",
-            name: "Pro Features",
-            description: "Pro feature access",
             expires_at: "2025-12-31T23:59:59Z",
             metadata: { tier: 1 },
           },
@@ -29,14 +27,13 @@ describe("Utility Functions", () => {
 
       expect(result).toHaveLength(1);
       expect(result[0].key).toBe("pro");
-      expect(result[0].name).toBe("Pro Features");
       expect(result[0].expires_at).toBe("2025-12-31T23:59:59Z");
       expect(result[0].metadata).toEqual({ tier: 1 });
     });
 
     it("should parse active_entitlements format", () => {
       const payload = {
-        active_entitlements: [{ key: "beta", name: "Beta Access" }],
+        active_entitlements: [{ key: "beta", expires_at: null, metadata: null }],
       };
 
       const result = parseActiveEntitlements(payload);
@@ -53,8 +50,6 @@ describe("Utility Functions", () => {
       const result = parseActiveEntitlements(payload);
 
       expect(result[0].key).toBe("basic");
-      expect(result[0].name).toBeNull();
-      expect(result[0].description).toBeNull();
       expect(result[0].expires_at).toBeNull();
       expect(result[0].metadata).toBeNull();
     });
