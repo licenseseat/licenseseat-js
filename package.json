@@ -1,6 +1,6 @@
 {
   "name": "@licenseseat/js",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Official JavaScript SDK for LicenseSeat – simple, secure software licensing.",
   "main": "dist/index.js",
   "module": "dist/index.js",
