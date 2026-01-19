@@ -15,8 +15,6 @@ export function parseActiveEntitlements(payload = {}) {
   const raw = payload.active_ents || payload.active_entitlements || [];
   return raw.map((e) => ({
     key: e.key,
-    name: e.name ?? null,
-    description: e.description ?? null,
     expires_at: e.expires_at ?? null,
     metadata: e.metadata ?? null,
   }));

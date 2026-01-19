@@ -24,7 +24,7 @@ describe("LicenseSeatSDK", () => {
     it("should use default configuration values", () => {
       const defaultSdk = new LicenseSeatSDK({ autoInitialize: false });
 
-      expect(defaultSdk.config.apiBaseUrl).toBe("https://api.licenseseat.com");
+      expect(defaultSdk.config.apiBaseUrl).toBe("https://licenseseat.com/api");
       expect(defaultSdk.config.storagePrefix).toBe("licenseseat_");
       expect(defaultSdk.config.autoValidateInterval).toBe(3600000);
       expect(defaultSdk.config.offlineFallbackEnabled).toBe(false);
@@ -198,7 +198,9 @@ describe("LicenseSeatSDK", () => {
       const result = await sdk.deactivate();
 
       expect(result).toBeDefined();
-      expect(result.success).toBe(true);
+      // API returns the deactivated activation object with deactivated_at set
+      expect(result.deactivated_at).toBeDefined();
+      expect(result.license_key).toBe(mockData.validLicenseKey);
     });
 
     it("should clear cached license after deactivation", async () => {

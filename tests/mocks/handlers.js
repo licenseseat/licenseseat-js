@@ -5,7 +5,7 @@
 
 import { http, HttpResponse } from "msw";
 
-const API_BASE = "https://api.licenseseat.com";
+const API_BASE = "https://licenseseat.com/api";
 
 /**
  * Mock data for testing
@@ -34,35 +34,46 @@ const mockActivationResponse = {
 
 /**
  * Mock validation response (valid license)
+ * API returns { valid: true, license: { ... } } structure
  */
 const mockValidValidationResponse = {
   valid: true,
-  license_key: mockData.validLicenseKey,
-  active_entitlements: [
-    {
-      key: "pro",
-      name: "Pro Features",
-      description: "Access to pro features",
-      expires_at: null,
-      metadata: null,
+  license: {
+    license_key: mockData.validLicenseKey,
+    status: "active",
+    starts_at: new Date().toISOString(),
+    ends_at: null,
+    mode: "hardware_locked",
+    plan_key: "pro",
+    seat_limit: 3,
+    active_activations_count: 1,
+    active_entitlements: [
+      {
+        key: "pro",
+        expires_at: null,
+        metadata: null,
+      },
+      {
+        key: "beta",
+        expires_at: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(), // 30 days
+        metadata: null,
+      },
+    ],
+    metadata: {},
+    product: {
+      slug: "test-product",
+      name: "Test Product",
     },
-    {
-      key: "beta",
-      name: "Beta Access",
-      description: "Access to beta features",
-      expires_at: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(), // 30 days
-      metadata: null,
-    },
-  ],
+  },
 };
 
 /**
  * Mock validation response (invalid license)
+ * API returns { error: "...", reason_code: "..." } for errors
  */
 const mockInvalidValidationResponse = {
-  valid: false,
-  reason: "License key not found",
-  error: "license_not_found",
+  error: "License key not found.",
+  reason_code: "license_not_found",
 };
 
 /**
@@ -70,14 +81,16 @@ const mockInvalidValidationResponse = {
  */
 const mockOfflineLicenseResponse = {
   payload: {
+    v: 1,
     lic_k: mockData.validLicenseKey,
+    prod_s: "test-product",
+    plan_k: "pro",
     exp_at: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString(), // 1 year
     kid: mockData.keyId,
+    sl: 3, // seat_limit
     active_ents: [
       {
         key: "pro",
-        name: "Pro Features",
-        description: "Access to pro features",
         expires_at: null,
         metadata: null,
       },
@@ -155,9 +168,17 @@ export const handlers = [
       );
     }
 
+    const body = await request.json();
+
+    // Return the deactivated activation object (matching actual API response)
     return HttpResponse.json({
-      success: true,
-      message: "Activation removed",
+      id: "act_123456",
+      device_identifier: body.device_identifier || mockData.deviceId,
+      activated_at: new Date(Date.now() - 86400000).toISOString(), // 1 day ago
+      deactivated_at: new Date().toISOString(),
+      ip_address: "127.0.0.1",
+      metadata: {},
+      license_key: body.license_key,
     });
   }),
 
@@ -167,23 +188,26 @@ export const handlers = [
     const { license_key } = body;
 
     if (license_key === mockData.invalidLicenseKey) {
-      return HttpResponse.json(mockInvalidValidationResponse, { status: 422 });
+      return HttpResponse.json(mockInvalidValidationResponse, { status: 404 });
     }
 
     if (license_key === mockData.expiredLicenseKey) {
       return HttpResponse.json(
         {
-          valid: false,
-          reason: "License has expired",
-          error: "license_expired",
+          error: "License has expired.",
+          reason_code: "expired",
         },
         { status: 422 }
       );
     }
 
+    // Return proper nested structure: { valid: true, license: { ... } }
     return HttpResponse.json({
-      ...mockValidValidationResponse,
-      license_key,
+      valid: true,
+      license: {
+        ...mockValidValidationResponse.license,
+        license_key,
+      },
     });
   }),
 

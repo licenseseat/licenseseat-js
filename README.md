@@ -121,7 +121,7 @@ const sdk = new LicenseSeat({
   apiKey: 'your-api-key',
 
   // API Configuration
-  apiBaseUrl: 'https://api.licenseseat.com',  // Default
+  apiBaseUrl: 'https://licenseseat.com/api',  // Default
 
   // Storage
   storagePrefix: 'licenseseat_',              // localStorage key prefix
@@ -151,7 +151,7 @@ const sdk = new LicenseSeat({
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `apiKey` | `string` | `null` | API key for authentication (required for most operations) |
-| `apiBaseUrl` | `string` | `'https://api.licenseseat.com'` | API base URL |
+| `apiBaseUrl` | `string` | `'https://licenseseat.com/api'` | API base URL |
 | `storagePrefix` | `string` | `'licenseseat_'` | Prefix for localStorage keys |
 | `autoValidateInterval` | `number` | `3600000` | Auto-validation interval in ms (1 hour) |
 | `autoInitialize` | `boolean` | `true` | Auto-initialize and validate cached license |
@@ -296,6 +296,15 @@ Clear all cached data and reset SDK state.
 sdk.reset();
 ```
 
+#### `sdk.destroy()`
+
+Destroy the SDK instance and release all resources. Call this when you no longer need the SDK to prevent memory leaks. After calling `destroy()`, the SDK instance should not be used.
+
+```javascript
+// When unmounting a component or closing an app
+sdk.destroy();
+```
+
 #### `sdk.initialize()`
 
 Manually initialize the SDK (only needed if `autoInitialize: false`).
@@ -335,6 +344,7 @@ sdk.off('activation:success', handler);
 | **Lifecycle** | | |
 | `license:loaded` | Cached license loaded on init | `CachedLicense` |
 | `sdk:reset` | SDK was reset | – |
+| `sdk:destroyed` | SDK was destroyed | – |
 | `sdk:error` | General SDK error | `{ message, error? }` |
 | **Activation** | | |
 | `activation:start` | Activation started | `{ licenseKey, deviceId }` |
@@ -723,7 +733,7 @@ This project follows [Semantic Versioning](https://semver.org/):
 
 | Change | Before | After | Migration |
 |--------|--------|-------|-----------|
-| `apiBaseUrl` default | `/api` | `https://api.licenseseat.com` | Set `apiBaseUrl` explicitly if using a relative URL |
+| `apiBaseUrl` default | `/api` | `https://licenseseat.com/api` | Set `apiBaseUrl` explicitly if using a relative URL |
 | `offlineFallbackEnabled` default | `true` | `false` | Set `offlineFallbackEnabled: true` if you need offline fallback |
 
 ### New Features in v0.2.0

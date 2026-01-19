@@ -37,7 +37,7 @@ import {
  * @type {import('./types.js').LicenseSeatConfig}
  */
 const DEFAULT_CONFIG = {
-  apiBaseUrl: "https://api.licenseseat.com",
+  apiBaseUrl: "https://licenseseat.com/api",
   storagePrefix: "licenseseat_",
   autoValidateInterval: 3600000, // 1 hour
   networkRecheckInterval: 30000, // 30 seconds
@@ -144,6 +144,20 @@ export class LicenseSeatSDK {
      * @private
      */
     this.lastOfflineValidation = null;
+
+    /**
+     * Flag to prevent concurrent syncOfflineAssets calls
+     * @type {boolean}
+     * @private
+     */
+    this.syncingOfflineAssets = false;
+
+    /**
+     * Flag indicating if SDK has been destroyed
+     * @type {boolean}
+     * @private
+     */
+    this.destroyed = false;
 
     // Enable synchronous SHA512 for noble-ed25519
     if (ed && ed.etc && sha512) {
@@ -312,7 +326,7 @@ export class LicenseSeatSDK {
     try {
       this.emit("validation:start", { licenseKey });
 
-      const response = await this.apiCall("/licenses/validate", {
+      const rawResponse = await this.apiCall("/licenses/validate", {
         method: "POST",
         body: {
           license_key: licenseKey,
@@ -320,6 +334,13 @@ export class LicenseSeatSDK {
           product_slug: options.productSlug,
         },
       });
+
+      // Normalize response: API returns { valid, license: { active_entitlements, ... } }
+      // SDK expects flat structure { valid, active_entitlements, ... }
+      const response = {
+        valid: rawResponse.valid,
+        ...(rawResponse.license || {}),
+      };
 
       // Preserve cached entitlements if server response omits them
       const cachedLicense = this.cache.getLicense();
@@ -643,9 +664,36 @@ export class LicenseSeatSDK {
    */
   reset() {
     this.stopAutoValidation();
+    this.stopConnectivityPolling();
+    if (this.offlineRefreshTimer) {
+      clearInterval(this.offlineRefreshTimer);
+      this.offlineRefreshTimer = null;
+    }
     this.cache.clear();
     this.lastOfflineValidation = null;
+    this.currentAutoLicenseKey = null;
     this.emit("sdk:reset");
+  }
+
+  /**
+   * Destroy the SDK instance and release all resources
+   * Call this when you no longer need the SDK to prevent memory leaks.
+   * After calling destroy(), the SDK instance should not be used.
+   * @returns {void}
+   */
+  destroy() {
+    this.destroyed = true;
+    this.stopAutoValidation();
+    this.stopConnectivityPolling();
+    if (this.offlineRefreshTimer) {
+      clearInterval(this.offlineRefreshTimer);
+      this.offlineRefreshTimer = null;
+    }
+    this.eventListeners = {};
+    this.cache.clear();
+    this.lastOfflineValidation = null;
+    this.currentAutoLicenseKey = null;
+    this.emit("sdk:destroyed");
   }
 
   // ============================================================
@@ -799,10 +847,18 @@ export class LicenseSeatSDK {
 
   /**
    * Fetch and cache offline license and public key
+   * Uses a lock to prevent concurrent calls from causing race conditions
    * @returns {Promise<void>}
    * @private
    */
   async syncOfflineAssets() {
+    // Prevent concurrent syncs
+    if (this.syncingOfflineAssets || this.destroyed) {
+      this.log("Skipping syncOfflineAssets: already syncing or destroyed");
+      return;
+    }
+
+    this.syncingOfflineAssets = true;
     try {
       const offline = await this.getOfflineLicense();
       this.cache.setOfflineLicense(offline);
@@ -832,6 +888,8 @@ export class LicenseSeatSDK {
       }
     } catch (err) {
       this.log("Failed to sync offline assets:", err);
+    } finally {
+      this.syncingOfflineAssets = false;
     }
   }
 
@@ -931,6 +989,7 @@ export class LicenseSeatSDK {
 
   /**
    * Quick offline verification using only local data (no network)
+   * Performs signature verification plus basic validity checks (expiry, license key match)
    * @returns {Promise<import('./types.js').ValidationResult|null>}
    * @private
    */
@@ -947,7 +1006,32 @@ export class LicenseSeatSDK {
         return { valid: false, offline: true, reason_code: "signature_invalid" };
       }
 
-      const active = parseActiveEntitlements(signed.payload || {});
+      /** @type {import('./types.js').OfflineLicensePayload} */
+      const payload = signed.payload || {};
+      const cached = this.cache.getLicense();
+
+      // License key match check
+      if (
+        !cached ||
+        !constantTimeEqual(payload.lic_k || "", cached.license_key || "")
+      ) {
+        return { valid: false, offline: true, reason_code: "license_mismatch" };
+      }
+
+      // Expiry check
+      const now = Date.now();
+      const expAt = payload.exp_at ? Date.parse(payload.exp_at) : null;
+      if (expAt && expAt < now) {
+        return { valid: false, offline: true, reason_code: "expired" };
+      }
+
+      // Clock tamper detection
+      const lastSeen = this.cache.getLastSeenTimestamp();
+      if (lastSeen && now + this.config.maxClockSkewMs < lastSeen) {
+        return { valid: false, offline: true, reason_code: "clock_tamper" };
+      }
+
+      const active = parseActiveEntitlements(payload);
       return {
         valid: true,
         offline: true,
