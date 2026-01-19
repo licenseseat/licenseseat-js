@@ -1,0 +1,39 @@
+{
+  "compilerOptions": {
+    // Output
+    "declaration": true,
+    "emitDeclarationOnly": true,
+    "declarationDir": "./dist/types",
+    "declarationMap": true,
+
+    // JavaScript Support
+    "allowJs": true,
+    "checkJs": true,
+
+    // Module System
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "target": "ES2020",
+    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+
+    // Strict Type Checking
+    "strict": false,
+    "noImplicitAny": false,
+    "skipLibCheck": true,
+
+    // Interop
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "forceConsistentCasingInFileNames": true,
+
+    // Output paths
+    "outDir": "./dist",
+    "rootDir": "./src",
+
+    // Type Resolution
+    "resolveJsonModule": true,
+    "isolatedModules": true
+  },
+  "include": ["src/**/*.js"],
+  "exclude": ["node_modules", "dist", "**/*.test.js", "**/*.spec.js"]
+}

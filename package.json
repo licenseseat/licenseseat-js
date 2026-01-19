@@ -1,49 +1,85 @@
 {
   "name": "@licenseseat/js",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Official JavaScript SDK for LicenseSeat – simple, secure software licensing.",
   "main": "dist/index.js",
   "module": "dist/index.js",
+  "types": "dist/types/index.d.ts",
   "exports": {
-    "import": "./dist/index.js"
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/types/index.d.ts"
+    }
   },
   "files": [
-    "dist/"
+    "dist/",
+    "src/"
   ],
   "type": "module",
+  "sideEffects": false,
   "scripts": {
-    "build": "esbuild src/index.js --bundle --format=esm --outfile=dist/index.js",
+    "build": "npm run build:js && npm run build:types",
+    "build:js": "esbuild src/index.js --bundle --format=esm --outfile=dist/index.js --external:@noble/ed25519 --external:@noble/hashes --external:canonical-json",
+    "build:bundle": "esbuild src/index.js --bundle --format=esm --outfile=dist/index.bundled.js",
+    "build:types": "tsc --project tsconfig.json",
+    "build:iife": "esbuild src/index.js --bundle --format=iife --global-name=LicenseSeat --outfile=dist/index.global.js",
     "dev": "esbuild src/index.js --bundle --format=esm --outfile=dist/index.js --watch",
-    "test": "echo \"No tests yet\""
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "lint": "eslint src/",
+    "prepublishOnly": "npm run build"
   },
   "keywords": [
     "licensing",
     "licenseseat",
     "sdk",
     "javascript",
+    "typescript",
     "js",
+    "ts",
     "software licensing",
     "license manager",
     "licensing server",
     "license key",
-    "api client"
+    "api client",
+    "license validation",
+    "offline licensing",
+    "entitlements"
   ],
   "repository": {
     "type": "git",
     "url": "https://github.com/licenseseat/licenseseat-js.git"
   },
-  "author": "rameerez",
+  "author": "LicenseSeat <hello@licenseseat.com>",
   "license": "MIT",
   "bugs": {
     "url": "https://github.com/licenseseat/licenseseat-js/issues"
   },
   "homepage": "https://licenseseat.com",
+  "engines": {
+    "node": ">=18.0.0"
+  },
   "devDependencies": {
-    "esbuild": "^0.20.2"
+    "@vitest/coverage-v8": "^1.6.0",
+    "esbuild": "^0.20.2",
+    "jsdom": "^24.1.3",
+    "msw": "^2.3.0",
+    "typescript": "^5.4.0",
+    "vitest": "^1.6.0"
   },
   "dependencies": {
     "@noble/ed25519": "^2.3.0",
     "@noble/hashes": "^1.8.0",
     "canonical-json": "^0.2.0"
+  },
+  "peerDependencies": {
+    "typescript": ">=4.7.0"
+  },
+  "peerDependenciesMeta": {
+    "typescript": {
+      "optional": true
+    }
   }
 }
