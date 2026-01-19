@@ -4,7 +4,7 @@
 [![npm version](https://img.shields.io/npm/v/@licenseseat/js.svg)](https://www.npmjs.com/package/@licenseseat/js)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 
-Official JavaScript/TypeScript SDK for [LicenseSeat](https://licenseseat.com) – the simple, secure licensing platform for apps, games, and plugins.
+The official JavaScript/TypeScript SDK for [LicenseSeat](https://licenseseat.com) – the simple, secure licensing platform for apps, games, and plugins.
 
 ---
 
@@ -760,10 +760,3 @@ MIT License – see [LICENSE](LICENSE) for details.
 - [GitHub Repository](https://github.com/licenseseat/licenseseat-js)
 - [npm Package](https://www.npmjs.com/package/@licenseseat/js)
 - [Report Issues](https://github.com/licenseseat/licenseseat-js/issues)
-
----
-
-## Support
-
-- **Email**: support@licenseseat.com
-- **GitHub Issues**: [Report a bug](https://github.com/licenseseat/licenseseat-js/issues/new)
