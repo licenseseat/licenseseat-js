@@ -1,10 +1,10 @@
-# LicenseSeat JavaScript SDK
-
-Official JavaScript/TypeScript SDK for [LicenseSeat](https://licenseseat.com) – the simple, secure licensing platform for apps, games, and plugins.
+# LicenseSeat - JavaScript SDK
 
 [![CI](https://github.com/licenseseat/licenseseat-js/actions/workflows/ci.yml/badge.svg)](https://github.com/licenseseat/licenseseat-js/actions/workflows/ci.yml)
 [![npm version](https://img.shields.io/npm/v/@licenseseat/js.svg)](https://www.npmjs.com/package/@licenseseat/js)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
+
+Official JavaScript/TypeScript SDK for [LicenseSeat](https://licenseseat.com) – the simple, secure licensing platform for apps, games, and plugins.
 
 ---
 
@@ -148,18 +148,18 @@ const sdk = new LicenseSeat({
 
 ### Configuration Options
 
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `apiKey` | `string` | `null` | API key for authentication (required for most operations) |
-| `apiBaseUrl` | `string` | `'https://licenseseat.com/api'` | API base URL |
-| `storagePrefix` | `string` | `'licenseseat_'` | Prefix for localStorage keys |
-| `autoValidateInterval` | `number` | `3600000` | Auto-validation interval in ms (1 hour) |
-| `autoInitialize` | `boolean` | `true` | Auto-initialize and validate cached license |
-| `offlineFallbackEnabled` | `boolean` | `false` | Enable offline validation on network errors |
-| `maxOfflineDays` | `number` | `0` | Maximum days license works offline (0 = disabled) |
-| `maxRetries` | `number` | `3` | Max retry attempts for failed API calls |
-| `retryDelay` | `number` | `1000` | Initial retry delay in ms (exponential backoff) |
-| `debug` | `boolean` | `false` | Enable debug logging to console |
+| Option                   | Type      | Default                         | Description                                               |
+| ------------------------ | --------- | ------------------------------- | --------------------------------------------------------- |
+| `apiKey`                 | `string`  | `null`                          | API key for authentication (required for most operations) |
+| `apiBaseUrl`             | `string`  | `'https://licenseseat.com/api'` | API base URL                                              |
+| `storagePrefix`          | `string`  | `'licenseseat_'`                | Prefix for localStorage keys                              |
+| `autoValidateInterval`   | `number`  | `3600000`                       | Auto-validation interval in ms (1 hour)                   |
+| `autoInitialize`         | `boolean` | `true`                          | Auto-initialize and validate cached license               |
+| `offlineFallbackEnabled` | `boolean` | `false`                         | Enable offline validation on network errors               |
+| `maxOfflineDays`         | `number`  | `0`                             | Maximum days license works offline (0 = disabled)         |
+| `maxRetries`             | `number`  | `3`                             | Max retry attempts for failed API calls                   |
+| `retryDelay`             | `number`  | `1000`                          | Initial retry delay in ms (exponential backoff)           |
+| `debug`                  | `boolean` | `false`                         | Enable debug logging to console                           |
 
 ---
 
@@ -339,42 +339,42 @@ sdk.off('activation:success', handler);
 
 ### Available Events
 
-| Event | Description | Data |
-|-------|-------------|------|
-| **Lifecycle** | | |
-| `license:loaded` | Cached license loaded on init | `CachedLicense` |
-| `sdk:reset` | SDK was reset | – |
-| `sdk:destroyed` | SDK was destroyed | – |
-| `sdk:error` | General SDK error | `{ message, error? }` |
-| **Activation** | | |
-| `activation:start` | Activation started | `{ licenseKey, deviceId }` |
-| `activation:success` | Activation succeeded | `CachedLicense` |
-| `activation:error` | Activation failed | `{ licenseKey, error }` |
-| **Deactivation** | | |
-| `deactivation:start` | Deactivation started | `CachedLicense` |
-| `deactivation:success` | Deactivation succeeded | `Object` |
-| `deactivation:error` | Deactivation failed | `{ error, license }` |
-| **Validation** | | |
-| `validation:start` | Validation started | `{ licenseKey }` |
-| `validation:success` | Online validation succeeded | `ValidationResult` |
-| `validation:failed` | Validation failed (invalid license) | `ValidationResult` |
-| `validation:error` | Validation error (network, etc.) | `{ licenseKey, error }` |
-| `validation:offline-success` | Offline validation succeeded | `ValidationResult` |
-| `validation:offline-failed` | Offline validation failed | `ValidationResult` |
-| `validation:auth-failed` | Auth failed during validation | `{ licenseKey, error, cached }` |
-| **Auto-Validation** | | |
-| `autovalidation:cycle` | Auto-validation scheduled | `{ nextRunAt: Date }` |
-| `autovalidation:stopped` | Auto-validation stopped | – |
-| **Network** | | |
-| `network:online` | Network connectivity restored | – |
-| `network:offline` | Network connectivity lost | `{ error }` |
-| **Offline License** | | |
-| `offlineLicense:fetching` | Fetching offline license | `{ licenseKey }` |
-| `offlineLicense:fetched` | Offline license fetched | `{ licenseKey, data }` |
-| `offlineLicense:fetchError` | Offline license fetch failed | `{ licenseKey, error }` |
-| `offlineLicense:ready` | Offline assets synced | `{ kid, exp_at }` |
-| `offlineLicense:verified` | Offline signature verified | `{ payload }` |
-| `offlineLicense:verificationFailed` | Offline signature invalid | `{ payload }` |
+| Event                               | Description                         | Data                            |
+| ----------------------------------- | ----------------------------------- | ------------------------------- |
+| **Lifecycle**                       |                                     |                                 |
+| `license:loaded`                    | Cached license loaded on init       | `CachedLicense`                 |
+| `sdk:reset`                         | SDK was reset                       | –                               |
+| `sdk:destroyed`                     | SDK was destroyed                   | –                               |
+| `sdk:error`                         | General SDK error                   | `{ message, error? }`           |
+| **Activation**                      |                                     |                                 |
+| `activation:start`                  | Activation started                  | `{ licenseKey, deviceId }`      |
+| `activation:success`                | Activation succeeded                | `CachedLicense`                 |
+| `activation:error`                  | Activation failed                   | `{ licenseKey, error }`         |
+| **Deactivation**                    |                                     |                                 |
+| `deactivation:start`                | Deactivation started                | `CachedLicense`                 |
+| `deactivation:success`              | Deactivation succeeded              | `Object`                        |
+| `deactivation:error`                | Deactivation failed                 | `{ error, license }`            |
+| **Validation**                      |                                     |                                 |
+| `validation:start`                  | Validation started                  | `{ licenseKey }`                |
+| `validation:success`                | Online validation succeeded         | `ValidationResult`              |
+| `validation:failed`                 | Validation failed (invalid license) | `ValidationResult`              |
+| `validation:error`                  | Validation error (network, etc.)    | `{ licenseKey, error }`         |
+| `validation:offline-success`        | Offline validation succeeded        | `ValidationResult`              |
+| `validation:offline-failed`         | Offline validation failed           | `ValidationResult`              |
+| `validation:auth-failed`            | Auth failed during validation       | `{ licenseKey, error, cached }` |
+| **Auto-Validation**                 |                                     |                                 |
+| `autovalidation:cycle`              | Auto-validation scheduled           | `{ nextRunAt: Date }`           |
+| `autovalidation:stopped`            | Auto-validation stopped             | –                               |
+| **Network**                         |                                     |                                 |
+| `network:online`                    | Network connectivity restored       | –                               |
+| `network:offline`                   | Network connectivity lost           | `{ error }`                     |
+| **Offline License**                 |                                     |                                 |
+| `offlineLicense:fetching`           | Fetching offline license            | `{ licenseKey }`                |
+| `offlineLicense:fetched`            | Offline license fetched             | `{ licenseKey, data }`          |
+| `offlineLicense:fetchError`         | Offline license fetch failed        | `{ licenseKey, error }`         |
+| `offlineLicense:ready`              | Offline assets synced               | `{ kid, exp_at }`               |
+| `offlineLicense:verified`           | Offline signature verified          | `{ payload }`                   |
+| `offlineLicense:verificationFailed` | Offline signature invalid           | `{ payload }`                   |
 
 ---
 
@@ -454,12 +454,12 @@ try {
 
 ### Error Types
 
-| Error | Description |
-|-------|-------------|
-| `APIError` | HTTP request failures (includes `status` and `data`) |
-| `LicenseError` | License operation failures (includes `code`) |
-| `ConfigurationError` | SDK misconfiguration |
-| `CryptoError` | Cryptographic operation failures |
+| Error                | Description                                          |
+| -------------------- | ---------------------------------------------------- |
+| `APIError`           | HTTP request failures (includes `status` and `data`) |
+| `LicenseError`       | License operation failures (includes `code`)         |
+| `ConfigurationError` | SDK misconfiguration                                 |
+| `CryptoError`        | Cryptographic operation failures                     |
 
 ---
 
@@ -561,17 +561,17 @@ npm install
 
 ### Scripts
 
-| Command | Description |
-|---------|-------------|
-| `npm run build` | Build JS bundle + TypeScript declarations |
-| `npm run build:js` | Build JavaScript bundle only |
-| `npm run build:types` | Generate TypeScript declarations |
-| `npm run build:iife` | Build global/IIFE bundle |
-| `npm run dev` | Watch mode for development |
-| `npm test` | Run tests |
-| `npm run test:watch` | Run tests in watch mode |
-| `npm run test:coverage` | Run tests with coverage report |
-| `npm run typecheck` | Type-check without emitting |
+| Command                 | Description                               |
+| ----------------------- | ----------------------------------------- |
+| `npm run build`         | Build JS bundle + TypeScript declarations |
+| `npm run build:js`      | Build JavaScript bundle only              |
+| `npm run build:types`   | Generate TypeScript declarations          |
+| `npm run build:iife`    | Build global/IIFE bundle                  |
+| `npm run dev`           | Watch mode for development                |
+| `npm test`              | Run tests                                 |
+| `npm run test:watch`    | Run tests in watch mode                   |
+| `npm run test:coverage` | Run tests with coverage report            |
+| `npm run typecheck`     | Type-check without emitting               |
 
 ### Project Structure
 
@@ -671,12 +671,12 @@ This ensures:
 
 Once published to npm, the package is automatically available on CDNs:
 
-| CDN | URL |
-|-----|-----|
-| **esm.sh** | `https://esm.sh/@licenseseat/js` |
-| **unpkg** | `https://unpkg.com/@licenseseat/js/dist/index.js` |
+| CDN          | URL                                                          |
+| ------------ | ------------------------------------------------------------ |
+| **esm.sh**   | `https://esm.sh/@licenseseat/js`                             |
+| **unpkg**    | `https://unpkg.com/@licenseseat/js/dist/index.js`            |
 | **jsDelivr** | `https://cdn.jsdelivr.net/npm/@licenseseat/js/dist/index.js` |
-| **Skypack** | `https://cdn.skypack.dev/@licenseseat/js` |
+| **Skypack**  | `https://cdn.skypack.dev/@licenseseat/js`                    |
 
 **Version pinning** (recommended for production):
 ```html
@@ -731,10 +731,10 @@ This project follows [Semantic Versioning](https://semver.org/):
 
 ### Breaking Changes in v0.2.0
 
-| Change | Before | After | Migration |
-|--------|--------|-------|-----------|
-| `apiBaseUrl` default | `/api` | `https://licenseseat.com/api` | Set `apiBaseUrl` explicitly if using a relative URL |
-| `offlineFallbackEnabled` default | `true` | `false` | Set `offlineFallbackEnabled: true` if you need offline fallback |
+| Change                           | Before | After                         | Migration                                                       |
+| -------------------------------- | ------ | ----------------------------- | --------------------------------------------------------------- |
+| `apiBaseUrl` default             | `/api` | `https://licenseseat.com/api` | Set `apiBaseUrl` explicitly if using a relative URL             |
+| `offlineFallbackEnabled` default | `true` | `false`                       | Set `offlineFallbackEnabled: true` if you need offline fallback |
 
 ### New Features in v0.2.0
 
