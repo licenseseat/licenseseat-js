@@ -37,7 +37,8 @@ import {
  * @type {import('./types.js').LicenseSeatConfig}
  */
 const DEFAULT_CONFIG = {
-  apiBaseUrl: "https://licenseseat.com/api",
+  apiBaseUrl: "https://licenseseat.com/api/v1",
+  productSlug: null, // Required: Product slug for API calls (e.g., "my-app")
   storagePrefix: "licenseseat_",
   autoValidateInterval: 3600000, // 1 hour
   networkRecheckInterval: 30000, // 30 seconds
@@ -235,32 +236,40 @@ export class LicenseSeatSDK {
    * @param {string} licenseKey - The license key to activate
    * @param {import('./types.js').ActivationOptions} [options={}] - Activation options
    * @returns {Promise<import('./types.js').CachedLicense>} Activation result with cached license data
+   * @throws {ConfigurationError} When productSlug is not configured
    * @throws {APIError} When the API request fails
    */
   async activate(licenseKey, options = {}) {
-    const deviceId = options.deviceIdentifier || generateDeviceId();
+    if (!this.config.productSlug) {
+      throw new ConfigurationError("productSlug is required for activation");
+    }
+
+    const deviceId = options.deviceId || generateDeviceId();
     const payload = {
-      license_key: licenseKey,
-      device_identifier: deviceId,
+      device_id: deviceId,
       metadata: options.metadata || {},
     };
 
-    if (options.softwareReleaseDate) {
-      payload.software_release_date = options.softwareReleaseDate;
+    if (options.deviceName) {
+      payload.device_name = options.deviceName;
     }
 
     try {
       this.emit("activation:start", { licenseKey, deviceId });
 
-      const response = await this.apiCall("/activations/activate", {
-        method: "POST",
-        body: payload,
-      });
+      // New v1 API: POST /products/{slug}/licenses/{key}/activate
+      const response = await this.apiCall(
+        `/products/${this.config.productSlug}/licenses/${encodeURIComponent(licenseKey)}/activate`,
+        {
+          method: "POST",
+          body: payload,
+        }
+      );
 
       /** @type {import('./types.js').CachedLicense} */
       const licenseData = {
         license_key: licenseKey,
-        device_identifier: deviceId,
+        device_id: deviceId,
         activation: response,
         activated_at: new Date().toISOString(),
         last_validated: new Date().toISOString(),
@@ -283,10 +292,15 @@ export class LicenseSeatSDK {
   /**
    * Deactivate the current license
    * @returns {Promise<Object>} Deactivation result from the API
+   * @throws {ConfigurationError} When productSlug is not configured
    * @throws {LicenseError} When no active license is found
    * @throws {APIError} When the API request fails
    */
   async deactivate() {
+    if (!this.config.productSlug) {
+      throw new ConfigurationError("productSlug is required for deactivation");
+    }
+
     const cachedLicense = this.cache.getLicense();
     if (!cachedLicense) {
       throw new LicenseError("No active license found", "no_license");
@@ -295,16 +309,19 @@ export class LicenseSeatSDK {
     try {
       this.emit("deactivation:start", cachedLicense);
 
-      const response = await this.apiCall("/activations/deactivate", {
-        method: "POST",
-        body: {
-          license_key: cachedLicense.license_key,
-          device_identifier: cachedLicense.device_identifier,
-        },
-      });
+      // New v1 API: POST /products/{slug}/licenses/{key}/deactivate
+      const response = await this.apiCall(
+        `/products/${this.config.productSlug}/licenses/${encodeURIComponent(cachedLicense.license_key)}/deactivate`,
+        {
+          method: "POST",
+          body: {
+            device_id: cachedLicense.device_id,
+          },
+        }
+      );
 
       this.cache.clearLicense();
-      this.cache.clearOfflineLicense();
+      this.cache.clearOfflineToken();
       this.stopAutoValidation();
 
       this.emit("deactivation:success", response);
@@ -320,26 +337,39 @@ export class LicenseSeatSDK {
    * @param {string} licenseKey - License key to validate
    * @param {import('./types.js').ValidationOptions} [options={}] - Validation options
    * @returns {Promise<import('./types.js').ValidationResult>} Validation result
+   * @throws {ConfigurationError} When productSlug is not configured
    * @throws {APIError} When the API request fails and offline fallback is not available
    */
   async validateLicense(licenseKey, options = {}) {
+    if (!this.config.productSlug) {
+      throw new ConfigurationError("productSlug is required for validation");
+    }
+
     try {
       this.emit("validation:start", { licenseKey });
 
-      const rawResponse = await this.apiCall("/licenses/validate", {
-        method: "POST",
-        body: {
-          license_key: licenseKey,
-          device_identifier: options.deviceIdentifier || this.cache.getDeviceId(),
-          product_slug: options.productSlug,
-        },
-      });
+      // New v1 API: POST /products/{slug}/licenses/{key}/validate
+      const rawResponse = await this.apiCall(
+        `/products/${this.config.productSlug}/licenses/${encodeURIComponent(licenseKey)}/validate`,
+        {
+          method: "POST",
+          body: {
+            device_id: options.deviceId || this.cache.getDeviceId(),
+          },
+        }
+      );
 
-      // Normalize response: API returns { valid, license: { active_entitlements, ... } }
-      // SDK expects flat structure { valid, active_entitlements, ... }
+      // Normalize response: API returns { object: "validation_result", valid, license: {...}, activation: {...} }
+      // SDK internal structure uses active_entitlements at the top level
       const response = {
         valid: rawResponse.valid,
-        ...(rawResponse.license || {}),
+        code: rawResponse.code,
+        message: rawResponse.message,
+        warnings: rawResponse.warnings,
+        license: rawResponse.license,
+        activation: rawResponse.activation,
+        // Extract entitlements from license for easy access
+        active_entitlements: rawResponse.license?.active_entitlements || [],
       };
 
       // Preserve cached entitlements if server response omits them
@@ -394,11 +424,18 @@ export class LicenseSeatSDK {
         }
       }
 
-      // Persist invalid status
+      // Persist invalid status from error response
       if (error instanceof APIError && error.data) {
         const cachedLicense = this.cache.getLicense();
         if (cachedLicense && cachedLicense.license_key === licenseKey) {
-          this.cache.updateValidation({ valid: false, ...error.data });
+          // Extract code from new error format: { error: { code, message } }
+          const errorCode = error.data.error?.code || error.data.code;
+          const errorMessage = error.data.error?.message || error.data.message;
+          this.cache.updateValidation({
+            valid: false,
+            code: errorCode,
+            message: errorMessage,
+          });
         }
         if (![0, 408, 429].includes(error.status)) {
           this.stopAutoValidation();
@@ -456,37 +493,59 @@ export class LicenseSeatSDK {
   }
 
   /**
-   * Get offline license data from the server
-   * @returns {Promise<import('./types.js').SignedOfflineLicense>} Signed offline license data
+   * Get offline token data from the server
+   * @param {Object} [options={}] - Options for offline token generation
+   * @param {string} [options.deviceId] - Device ID to bind the token to (required for hardware_locked mode)
+   * @param {number} [options.ttlDays] - Token lifetime in days (default: 30, max: 90)
+   * @returns {Promise<import('./types.js').OfflineToken>} Offline token data
+   * @throws {ConfigurationError} When productSlug is not configured
    * @throws {LicenseError} When no active license is found
    * @throws {APIError} When the API request fails
    */
-  async getOfflineLicense() {
+  async getOfflineToken(options = {}) {
+    if (!this.config.productSlug) {
+      throw new ConfigurationError("productSlug is required for offline token");
+    }
+
     const license = this.cache.getLicense();
     if (!license || !license.license_key) {
       const errorMsg =
-        "No active license key found in cache to fetch offline license.";
+        "No active license key found in cache to fetch offline token.";
       this.emit("sdk:error", { message: errorMsg });
       throw new LicenseError(errorMsg, "no_license");
     }
 
     try {
-      this.emit("offlineLicense:fetching", { licenseKey: license.license_key });
-      const path = `/licenses/${license.license_key}/offline_license`;
+      this.emit("offlineToken:fetching", { licenseKey: license.license_key });
 
-      const response = await this.apiCall(path, { method: "POST" });
+      // Build request body
+      const body = {};
+      if (options.deviceId) {
+        body.device_id = options.deviceId;
+      }
+      if (options.ttlDays) {
+        body.ttl_days = options.ttlDays;
+      }
 
-      this.emit("offlineLicense:fetched", {
+      // New v1 API: POST /products/{slug}/licenses/{key}/offline-token
+      const path = `/products/${this.config.productSlug}/licenses/${encodeURIComponent(license.license_key)}/offline-token`;
+
+      const response = await this.apiCall(path, {
+        method: "POST",
+        body: Object.keys(body).length > 0 ? body : undefined,
+      });
+
+      this.emit("offlineToken:fetched", {
         licenseKey: license.license_key,
         data: response,
       });
       return response;
     } catch (error) {
       this.log(
-        `Failed to get offline license for ${license.license_key}:`,
+        `Failed to get offline token for ${license.license_key}:`,
         error
       );
-      this.emit("offlineLicense:fetchError", {
+      this.emit("offlineToken:fetchError", {
         licenseKey: license.license_key,
         error: error,
       });
@@ -495,50 +554,48 @@ export class LicenseSeatSDK {
   }
 
   /**
-   * Fetch a public key from the server by key ID
-   * @param {string} keyId - The Key ID (kid) for which to fetch the public key
-   * @returns {Promise<string>} Base64-encoded public key
+   * Fetch a signing key from the server by key ID
+   * @param {string} keyId - The Key ID (kid) for which to fetch the signing key
+   * @returns {Promise<import('./types.js').SigningKey>} Signing key data
    * @throws {Error} When keyId is not provided or the key is not found
    */
-  async getPublicKey(keyId) {
+  async getSigningKey(keyId) {
     if (!keyId) {
-      throw new Error("Key ID is required to fetch a public key.");
+      throw new Error("Key ID is required to fetch a signing key.");
     }
     try {
-      this.log(`Fetching public key for kid: ${keyId}`);
-      const response = await this.apiCall(`/public_keys/${keyId}`, {
+      this.log(`Fetching signing key for kid: ${keyId}`);
+      // New v1 API: GET /signing-keys/{key_id}
+      const response = await this.apiCall(`/signing-keys/${encodeURIComponent(keyId)}`, {
         method: "GET",
       });
-      if (response && response.public_key_b64) {
-        this.log(`Successfully fetched public key for kid: ${keyId}`);
-        return response.public_key_b64;
+      if (response && response.public_key) {
+        this.log(`Successfully fetched signing key for kid: ${keyId}`);
+        return response;
       } else {
         throw new Error(
-          `Public key not found or invalid response for kid: ${keyId}`
+          `Signing key not found or invalid response for kid: ${keyId}`
         );
       }
     } catch (error) {
-      this.log(`Failed to fetch public key for kid ${keyId}:`, error);
+      this.log(`Failed to fetch signing key for kid ${keyId}:`, error);
       throw error;
     }
   }
 
   /**
-   * Verify a signed offline license client-side using Ed25519
-   * @param {import('./types.js').SignedOfflineLicense} signedLicenseData - The signed license data
+   * Verify a signed offline token client-side using Ed25519
+   * @param {import('./types.js').OfflineToken} offlineTokenData - The offline token data
    * @param {string} publicKeyB64 - Base64-encoded public Ed25519 key
    * @returns {Promise<boolean>} True if verification is successful
    * @throws {CryptoError} When crypto library is not available
    * @throws {Error} When inputs are invalid
    */
-  async verifyOfflineLicense(signedLicenseData, publicKeyB64) {
-    this.log("Attempting to verify offline license client-side.");
-    if (
-      !signedLicenseData ||
-      !signedLicenseData.payload ||
-      !signedLicenseData.signature_b64u
-    ) {
-      throw new Error("Invalid signedLicenseData object provided.");
+  async verifyOfflineToken(offlineTokenData, publicKeyB64) {
+    this.log("Attempting to verify offline token client-side.");
+
+    if (!offlineTokenData || !offlineTokenData.canonical || !offlineTokenData.signature) {
+      throw new Error("Invalid offline token object provided. Expected format: { token, signature, canonical }");
     }
     if (!publicKeyB64) {
       throw new Error("Public key (Base64 encoded) is required.");
@@ -553,29 +610,22 @@ export class LicenseSeatSDK {
     }
 
     try {
-      const payloadString = canonicalJsonStringify(signedLicenseData.payload);
-      const messageBytes = new TextEncoder().encode(payloadString);
+      const messageBytes = new TextEncoder().encode(offlineTokenData.canonical);
+      const signatureBytes = base64UrlDecode(offlineTokenData.signature.value);
       const publicKeyBytes = base64UrlDecode(publicKeyB64);
-      const signatureBytes = base64UrlDecode(signedLicenseData.signature_b64u);
 
       const isValid = ed.verify(signatureBytes, messageBytes, publicKeyBytes);
 
       if (isValid) {
-        this.log(
-          "Offline license signature VERIFIED successfully client-side."
-        );
-        this.emit("offlineLicense:verified", {
-          payload: signedLicenseData.payload,
-        });
+        this.log("Offline token signature VERIFIED successfully client-side.");
+        this.emit("offlineToken:verified", { token: offlineTokenData.token });
       } else {
-        this.log("Offline license signature INVALID client-side.");
-        this.emit("offlineLicense:verificationFailed", {
-          payload: signedLicenseData.payload,
-        });
+        this.log("Offline token signature INVALID client-side.");
+        this.emit("offlineToken:verificationFailed", { token: offlineTokenData.token });
       }
       return isValid;
     } catch (error) {
-      this.log("Client-side offline license verification error:", error);
+      this.log("Client-side offline token verification error:", error);
       this.emit("sdk:error", {
         message: "Client-side verification failed.",
         error: error,
@@ -603,12 +653,12 @@ export class LicenseSeatSDK {
       if (validation.offline) {
         return {
           status: "offline-invalid",
-          message: validation.reason_code || "License invalid (offline)",
+          message: validation.code || "License invalid (offline)",
         };
       }
       return {
         status: "invalid",
-        message: validation.reason || "License invalid",
+        message: validation.message || validation.code || "License invalid",
       };
     }
 
@@ -616,7 +666,7 @@ export class LicenseSeatSDK {
       return {
         status: "offline-valid",
         license: license.license_key,
-        device: license.device_identifier,
+        device: license.device_id,
         activated_at: license.activated_at,
         last_validated: license.last_validated,
         entitlements: validation.active_entitlements || [],
@@ -626,7 +676,7 @@ export class LicenseSeatSDK {
     return {
       status: "active",
       license: license.license_key,
-      device: license.device_identifier,
+      device: license.device_id,
       activated_at: license.activated_at,
       last_validated: license.last_validated,
       entitlements: validation.active_entitlements || [],
@@ -802,9 +852,10 @@ export class LicenseSeatSDK {
   startConnectivityPolling() {
     if (this.connectivityTimer) return;
 
-    const heartbeat = async () => {
+    const healthCheck = async () => {
       try {
-        await fetch(`${this.config.apiBaseUrl}/heartbeat`, {
+        // New v1 API: GET /health
+        await fetch(`${this.config.apiBaseUrl}/health`, {
           method: "GET",
           credentials: "omit",
         });
@@ -824,7 +875,7 @@ export class LicenseSeatSDK {
     };
 
     this.connectivityTimer = setInterval(
-      heartbeat,
+      healthCheck,
       this.config.networkRecheckInterval
     );
   }
@@ -846,7 +897,7 @@ export class LicenseSeatSDK {
   // ============================================================
 
   /**
-   * Fetch and cache offline license and public key
+   * Fetch and cache offline token and signing key
    * Uses a lock to prevent concurrent calls from causing race conditions
    * @returns {Promise<void>}
    * @private
@@ -860,21 +911,21 @@ export class LicenseSeatSDK {
 
     this.syncingOfflineAssets = true;
     try {
-      const offline = await this.getOfflineLicense();
-      this.cache.setOfflineLicense(offline);
+      const offline = await this.getOfflineToken();
+      this.cache.setOfflineToken(offline);
 
-      const kid = offline.kid || offline.payload?.kid;
+      const kid = offline.signature?.key_id || offline.token?.kid;
       if (kid) {
         const existingKey = this.cache.getPublicKey(kid);
         if (!existingKey) {
-          const pub = await this.getPublicKey(kid);
-          this.cache.setPublicKey(kid, pub);
+          const signingKey = await this.getSigningKey(kid);
+          this.cache.setPublicKey(kid, signingKey.public_key);
         }
       }
 
-      this.emit("offlineLicense:ready", {
-        kid: offline.kid || offline.payload?.kid,
-        exp_at: offline.payload?.exp_at,
+      this.emit("offlineToken:ready", {
+        kid: kid,
+        exp: offline.token?.exp,
       });
 
       // Verify freshly-cached assets
@@ -907,50 +958,47 @@ export class LicenseSeatSDK {
   }
 
   /**
-   * Verify cached offline license
+   * Verify cached offline token
    * @returns {Promise<import('./types.js').ValidationResult>}
    * @private
    */
   async verifyCachedOffline() {
-    const signed = this.cache.getOfflineLicense();
+    const signed = this.cache.getOfflineToken();
     if (!signed) {
-      return { valid: false, offline: true, reason_code: "no_offline_license" };
+      return { valid: false, offline: true, code: "no_offline_token" };
     }
 
-    const kid = signed.kid || signed.payload?.kid;
+    const kid = signed.signature?.key_id || signed.token?.kid;
     let pub = kid ? this.cache.getPublicKey(kid) : null;
     if (!pub) {
       try {
-        pub = await this.getPublicKey(kid);
+        const signingKey = await this.getSigningKey(kid);
+        pub = signingKey.public_key;
         this.cache.setPublicKey(kid, pub);
       } catch (e) {
-        return { valid: false, offline: true, reason_code: "no_public_key" };
+        return { valid: false, offline: true, code: "no_public_key" };
       }
     }
 
     try {
-      const ok = await this.verifyOfflineLicense(signed, pub);
+      const ok = await this.verifyOfflineToken(signed, pub);
       if (!ok) {
-        return { valid: false, offline: true, reason_code: "signature_invalid" };
+        return { valid: false, offline: true, code: "signature_invalid" };
       }
 
-      /** @type {import('./types.js').OfflineLicensePayload} */
-      const payload = signed.payload || {};
+      const token = signed.token;
       const cached = this.cache.getLicense();
 
       // License key match
-      if (
-        !cached ||
-        !constantTimeEqual(payload.lic_k || "", cached.license_key || "")
-      ) {
-        return { valid: false, offline: true, reason_code: "license_mismatch" };
+      if (!cached || !constantTimeEqual(token.license_key || "", cached.license_key || "")) {
+        return { valid: false, offline: true, code: "license_mismatch" };
       }
 
-      // Expiry check
+      // Expiry check (exp is Unix timestamp in seconds)
       const now = Date.now();
-      const expAt = payload.exp_at ? Date.parse(payload.exp_at) : null;
+      const expAt = token.exp ? token.exp * 1000 : null;
       if (expAt && expAt < now) {
-        return { valid: false, offline: true, reason_code: "expired" };
+        return { valid: false, offline: true, code: "expired" };
       }
 
       // Grace period check
@@ -962,7 +1010,7 @@ export class LicenseSeatSDK {
             return {
               valid: false,
               offline: true,
-              reason_code: "grace_period_expired",
+              code: "grace_period_expired",
             };
           }
         }
@@ -971,19 +1019,19 @@ export class LicenseSeatSDK {
       // Clock tamper detection
       const lastSeen = this.cache.getLastSeenTimestamp();
       if (lastSeen && now + this.config.maxClockSkewMs < lastSeen) {
-        return { valid: false, offline: true, reason_code: "clock_tamper" };
+        return { valid: false, offline: true, code: "clock_tamper" };
       }
 
       this.cache.setLastSeenTimestamp(now);
 
-      const active = parseActiveEntitlements(payload);
+      const active = parseActiveEntitlements(token);
       return {
         valid: true,
         offline: true,
         ...(active.length ? { active_entitlements: active } : {}),
       };
     } catch (e) {
-      return { valid: false, offline: true, reason_code: "verification_error" };
+      return { valid: false, offline: true, code: "verification_error" };
     }
   }
 
@@ -994,51 +1042,48 @@ export class LicenseSeatSDK {
    * @private
    */
   async quickVerifyCachedOfflineLocal() {
-    const signed = this.cache.getOfflineLicense();
+    const signed = this.cache.getOfflineToken();
     if (!signed) return null;
-    const kid = signed.kid || signed.payload?.kid;
+
+    const kid = signed.signature?.key_id || signed.token?.kid;
     const pub = kid ? this.cache.getPublicKey(kid) : null;
     if (!pub) return null;
 
     try {
-      const ok = await this.verifyOfflineLicense(signed, pub);
+      const ok = await this.verifyOfflineToken(signed, pub);
       if (!ok) {
-        return { valid: false, offline: true, reason_code: "signature_invalid" };
+        return { valid: false, offline: true, code: "signature_invalid" };
       }
 
-      /** @type {import('./types.js').OfflineLicensePayload} */
-      const payload = signed.payload || {};
+      const token = signed.token;
       const cached = this.cache.getLicense();
 
       // License key match check
-      if (
-        !cached ||
-        !constantTimeEqual(payload.lic_k || "", cached.license_key || "")
-      ) {
-        return { valid: false, offline: true, reason_code: "license_mismatch" };
+      if (!cached || !constantTimeEqual(token.license_key || "", cached.license_key || "")) {
+        return { valid: false, offline: true, code: "license_mismatch" };
       }
 
-      // Expiry check
+      // Expiry check (exp is Unix timestamp in seconds)
       const now = Date.now();
-      const expAt = payload.exp_at ? Date.parse(payload.exp_at) : null;
+      const expAt = token.exp ? token.exp * 1000 : null;
       if (expAt && expAt < now) {
-        return { valid: false, offline: true, reason_code: "expired" };
+        return { valid: false, offline: true, code: "expired" };
       }
 
       // Clock tamper detection
       const lastSeen = this.cache.getLastSeenTimestamp();
       if (lastSeen && now + this.config.maxClockSkewMs < lastSeen) {
-        return { valid: false, offline: true, reason_code: "clock_tamper" };
+        return { valid: false, offline: true, code: "clock_tamper" };
       }
 
-      const active = parseActiveEntitlements(payload);
+      const active = parseActiveEntitlements(token);
       return {
         valid: true,
         offline: true,
         ...(active.length ? { active_entitlements: active } : {}),
       };
     } catch (_) {
-      return { valid: false, offline: true, reason_code: "verification_error" };
+      return { valid: false, offline: true, code: "verification_error" };
     }
   }
 
@@ -1087,11 +1132,16 @@ export class LicenseSeatSDK {
         const data = await response.json();
 
         if (!response.ok) {
-          throw new APIError(
-            data.error || "Request failed",
-            response.status,
-            data
-          );
+          // Handle new error format: { error: { code, message, details } }
+          // Also support legacy format: { error: "message", reason_code: "code" }
+          const errorObj = data.error;
+          let errorMessage = "Request failed";
+          if (typeof errorObj === "object" && errorObj !== null) {
+            errorMessage = errorObj.message || "Request failed";
+          } else if (typeof errorObj === "string") {
+            errorMessage = errorObj;
+          }
+          throw new APIError(errorMessage, response.status, data);
         }
 
         // Back online

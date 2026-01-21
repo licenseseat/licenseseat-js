@@ -43,7 +43,10 @@ pnpm add @licenseseat/js
 <script type="module">
   import LicenseSeat from 'https://esm.sh/@licenseseat/js';
 
-  const sdk = new LicenseSeat({ apiKey: 'your-api-key' });
+  const sdk = new LicenseSeat({
+    apiKey: 'your-api-key',
+    productSlug: 'your-product'
+  });
 </script>
 
 <!-- ESM via unpkg -->
@@ -69,6 +72,7 @@ import LicenseSeat from '@licenseseat/js';
 // Create SDK instance
 const sdk = new LicenseSeat({
   apiKey: 'your-api-key',
+  productSlug: 'your-product',  // Required: Your product slug
   debug: true
 });
 
@@ -98,6 +102,7 @@ import LicenseSeat, {
 
 const config: LicenseSeatConfig = {
   apiKey: 'your-api-key',
+  productSlug: 'your-product',
   debug: true
 };
 
@@ -117,11 +122,14 @@ TypeScript users get full type support automatically – the package includes ge
 
 ```javascript
 const sdk = new LicenseSeat({
+  // Required
+  productSlug: 'your-product',            // Your product slug from LicenseSeat dashboard
+
   // Required for authenticated operations
   apiKey: 'your-api-key',
 
   // API Configuration
-  apiBaseUrl: 'https://licenseseat.com/api',  // Default
+  apiBaseUrl: 'https://licenseseat.com/api/v1',  // Default
 
   // Storage
   storagePrefix: 'licenseseat_',              // localStorage key prefix
@@ -148,18 +156,19 @@ const sdk = new LicenseSeat({
 
 ### Configuration Options
 
-| Option                   | Type      | Default                         | Description                                               |
-| ------------------------ | --------- | ------------------------------- | --------------------------------------------------------- |
-| `apiKey`                 | `string`  | `null`                          | API key for authentication (required for most operations) |
-| `apiBaseUrl`             | `string`  | `'https://licenseseat.com/api'` | API base URL                                              |
-| `storagePrefix`          | `string`  | `'licenseseat_'`                | Prefix for localStorage keys                              |
-| `autoValidateInterval`   | `number`  | `3600000`                       | Auto-validation interval in ms (1 hour)                   |
-| `autoInitialize`         | `boolean` | `true`                          | Auto-initialize and validate cached license               |
-| `offlineFallbackEnabled` | `boolean` | `false`                         | Enable offline validation on network errors               |
-| `maxOfflineDays`         | `number`  | `0`                             | Maximum days license works offline (0 = disabled)         |
-| `maxRetries`             | `number`  | `3`                             | Max retry attempts for failed API calls                   |
-| `retryDelay`             | `number`  | `1000`                          | Initial retry delay in ms (exponential backoff)           |
-| `debug`                  | `boolean` | `false`                         | Enable debug logging to console                           |
+| Option                   | Type      | Default                            | Description                                               |
+| ------------------------ | --------- | ---------------------------------- | --------------------------------------------------------- |
+| `productSlug`            | `string`  | –                                  | **Required.** Your product slug from the dashboard        |
+| `apiKey`                 | `string`  | `null`                             | API key for authentication (required for most operations) |
+| `apiBaseUrl`             | `string`  | `'https://licenseseat.com/api/v1'` | API base URL                                              |
+| `storagePrefix`          | `string`  | `'licenseseat_'`                   | Prefix for localStorage keys                              |
+| `autoValidateInterval`   | `number`  | `3600000`                          | Auto-validation interval in ms (1 hour)                   |
+| `autoInitialize`         | `boolean` | `true`                             | Auto-initialize and validate cached license               |
+| `offlineFallbackEnabled` | `boolean` | `false`                            | Enable offline validation on network errors               |
+| `maxOfflineDays`         | `number`  | `0`                                | Maximum days license works offline (0 = disabled)         |
+| `maxRetries`             | `number`  | `3`                                | Max retry attempts for failed API calls                   |
+| `retryDelay`             | `number`  | `1000`                             | Initial retry delay in ms (exponential backoff)           |
+| `debug`                  | `boolean` | `false`                            | Enable debug logging to console                           |
 
 ---
 
@@ -173,17 +182,24 @@ Activates a license key on this device.
 
 ```javascript
 const result = await sdk.activate('LICENSE-KEY', {
-  deviceIdentifier: 'custom-device-id',  // Optional: auto-generated if not provided
-  softwareReleaseDate: '2024-01-15',     // Optional: for version-aware licensing
-  metadata: { version: '1.0.0' }         // Optional: custom metadata
+  deviceId: 'custom-device-id',       // Optional: auto-generated if not provided
+  deviceName: "John's MacBook Pro",   // Optional: human-readable device name
+  metadata: { version: '1.0.0' }      // Optional: custom metadata
 });
 
 console.log(result);
 // {
 //   license_key: 'LICENSE-KEY',
-//   device_identifier: 'web-abc123-xyz',
+//   device_id: 'web-abc123',
 //   activated_at: '2024-01-15T10:30:00Z',
-//   activation: { ... }
+//   activation: {
+//     object: 'activation',
+//     id: 123,
+//     device_id: 'web-abc123',
+//     license_key: 'LICENSE-KEY',
+//     activated_at: '2024-01-15T10:30:00Z',
+//     license: { ... }
+//   }
 // }
 ```
 
@@ -192,7 +208,13 @@ console.log(result);
 Deactivates the current license and clears cached data.
 
 ```javascript
-await sdk.deactivate();
+const result = await sdk.deactivate();
+console.log(result);
+// {
+//   object: 'deactivation',
+//   activation_id: 123,
+//   deactivated_at: '2024-01-15T12:00:00Z'
+// }
 ```
 
 #### `sdk.validateLicense(licenseKey, options?)`
@@ -201,17 +223,26 @@ Validates a license with the server.
 
 ```javascript
 const result = await sdk.validateLicense('LICENSE-KEY', {
-  deviceIdentifier: 'device-id',  // Optional
-  productSlug: 'my-product'       // Optional
+  deviceId: 'device-id'  // Optional: required for hardware_locked mode
 });
 
 console.log(result);
 // {
 //   valid: true,
-//   active_entitlements: [
-//     { key: 'pro', name: 'Pro Features', expires_at: null },
-//     { key: 'beta', name: 'Beta Access', expires_at: '2024-12-31T23:59:59Z' }
-//   ]
+//   license: {
+//     key: 'LICENSE-KEY',
+//     status: 'active',
+//     mode: 'hardware_locked',
+//     plan_key: 'pro',
+//     active_seats: 1,
+//     seat_limit: 3,
+//     active_entitlements: [
+//       { key: 'pro', expires_at: null, metadata: null },
+//       { key: 'beta', expires_at: '2024-12-31T23:59:59Z', metadata: null }
+//     ],
+//     product: { slug: 'your-product', name: 'Your Product' }
+//   },
+//   active_entitlements: [...]
 // }
 ```
 
@@ -268,7 +299,7 @@ console.log(status);
 // {
 //   status: 'active',
 //   license: 'LICENSE-KEY',
-//   device: 'web-abc123-xyz',
+//   device: 'web-abc123',
 //   activated_at: '2024-01-15T10:30:00Z',
 //   last_validated: '2024-01-15T11:30:00Z',
 //   entitlements: [...]
@@ -312,6 +343,7 @@ Manually initialize the SDK (only needed if `autoInitialize: false`).
 ```javascript
 const sdk = new LicenseSeat({
   apiKey: 'key',
+  productSlug: 'your-product',
   autoInitialize: false  // Don't auto-initialize
 });
 
@@ -352,7 +384,7 @@ sdk.off('activation:success', handler);
 | `activation:error`                  | Activation failed                   | `{ licenseKey, error }`         |
 | **Deactivation**                    |                                     |                                 |
 | `deactivation:start`                | Deactivation started                | `CachedLicense`                 |
-| `deactivation:success`              | Deactivation succeeded              | `Object`                        |
+| `deactivation:success`              | Deactivation succeeded              | `DeactivationResponse`          |
 | `deactivation:error`                | Deactivation failed                 | `{ error, license }`            |
 | **Validation**                      |                                     |                                 |
 | `validation:start`                  | Validation started                  | `{ licenseKey }`                |
@@ -368,13 +400,13 @@ sdk.off('activation:success', handler);
 | **Network**                         |                                     |                                 |
 | `network:online`                    | Network connectivity restored       | –                               |
 | `network:offline`                   | Network connectivity lost           | `{ error }`                     |
-| **Offline License**                 |                                     |                                 |
-| `offlineLicense:fetching`           | Fetching offline license            | `{ licenseKey }`                |
-| `offlineLicense:fetched`            | Offline license fetched             | `{ licenseKey, data }`          |
-| `offlineLicense:fetchError`         | Offline license fetch failed        | `{ licenseKey, error }`         |
-| `offlineLicense:ready`              | Offline assets synced               | `{ kid, exp_at }`               |
-| `offlineLicense:verified`           | Offline signature verified          | `{ payload }`                   |
-| `offlineLicense:verificationFailed` | Offline signature invalid           | `{ payload }`                   |
+| **Offline Token**                   |                                     |                                 |
+| `offlineToken:fetching`             | Fetching offline token              | `{ licenseKey }`                |
+| `offlineToken:fetched`              | Offline token fetched               | `{ licenseKey, data }`          |
+| `offlineToken:fetchError`           | Offline token fetch failed          | `{ licenseKey, error }`         |
+| `offlineToken:ready`                | Offline assets synced               | `{ kid, exp_at }`               |
+| `offlineToken:verified`             | Offline signature verified          | `{ payload }`                   |
+| `offlineToken:verificationFailed`   | Offline signature invalid           | `{ payload }`                   |
 
 ---
 
@@ -386,7 +418,10 @@ For applications that need a shared SDK instance:
 import { configure, getSharedInstance, resetSharedInstance } from '@licenseseat/js';
 
 // Configure once at app startup
-configure({ apiKey: 'your-key' });
+configure({
+  apiKey: 'your-key',
+  productSlug: 'your-product'
+});
 
 // Use anywhere in your app
 const sdk = getSharedInstance();
@@ -400,11 +435,12 @@ resetSharedInstance();
 
 ## Offline Support
 
-The SDK supports offline license validation using cryptographically signed offline licenses (Ed25519).
+The SDK supports offline license validation using cryptographically signed offline tokens (Ed25519).
 
 ```javascript
 const sdk = new LicenseSeat({
   apiKey: 'your-key',
+  productSlug: 'your-product',
   offlineFallbackEnabled: true,  // Enable offline fallback
   maxOfflineDays: 7              // Allow 7 days offline
 });
@@ -421,10 +457,44 @@ if (result.offline) {
 
 ### How Offline Validation Works
 
-1. On activation, the SDK fetches a signed offline license from the server
-2. The offline license contains the license data + Ed25519 signature
+1. On activation, the SDK fetches a signed offline token from the server
+2. The offline token contains:
+   - License data (key, plan, entitlements, expiration)
+   - Ed25519 signature
+   - Canonical JSON for verification
 3. When offline, the SDK verifies the signature locally
 4. Clock tamper detection prevents users from bypassing expiration
+
+### Offline Token Structure
+
+```javascript
+{
+  object: 'offline_token',
+  token: {
+    schema_version: 1,
+    license_key: 'LICENSE-KEY',
+    product_slug: 'your-product',
+    plan_key: 'pro',
+    mode: 'hardware_locked',
+    device_id: 'web-abc123',
+    iat: 1704067200,        // Issued at (Unix timestamp)
+    exp: 1706659200,        // Expires at (Unix timestamp)
+    nbf: 1704067200,        // Not before (Unix timestamp)
+    license_expires_at: null,
+    kid: 'key-id-001',
+    entitlements: [
+      { key: 'pro', expires_at: null }
+    ],
+    metadata: {}
+  },
+  signature: {
+    algorithm: 'Ed25519',
+    key_id: 'key-id-001',
+    value: 'base64url-encoded-signature'
+  },
+  canonical: '{"entitlements":[...],"exp":...}'
+}
+```
 
 ---
 
@@ -445,9 +515,12 @@ try {
 } catch (error) {
   if (error instanceof APIError) {
     console.log('HTTP Status:', error.status);
-    console.log('Response:', error.data);
+    console.log('Error Code:', error.data?.error?.code);
+    console.log('Error Message:', error.data?.error?.message);
   } else if (error instanceof LicenseError) {
     console.log('License error:', error.code);
+  } else if (error instanceof ConfigurationError) {
+    console.log('Config error:', error.message);
   }
 }
 ```
@@ -458,8 +531,32 @@ try {
 | -------------------- | ---------------------------------------------------- |
 | `APIError`           | HTTP request failures (includes `status` and `data`) |
 | `LicenseError`       | License operation failures (includes `code`)         |
-| `ConfigurationError` | SDK misconfiguration                                 |
+| `ConfigurationError` | SDK misconfiguration (e.g., missing `productSlug`)   |
 | `CryptoError`        | Cryptographic operation failures                     |
+
+### API Error Format
+
+API errors follow this structure:
+
+```javascript
+{
+  error: {
+    code: 'license_not_found',       // Machine-readable error code
+    message: 'License not found.',   // Human-readable message
+    details: { ... }                 // Optional additional details
+  }
+}
+```
+
+Common error codes:
+- `unauthorized` - Invalid or missing API key
+- `license_not_found` - License key doesn't exist
+- `license_expired` - License has expired
+- `license_suspended` - License is suspended
+- `license_revoked` - License has been revoked
+- `seat_limit_reached` - No more seats available
+- `device_already_activated` - Device is already activated
+- `activation_not_found` - Activation doesn't exist (for deactivation)
 
 ---
 
@@ -480,7 +577,10 @@ Simply import and use:
 ```javascript
 import LicenseSeat from '@licenseseat/js';
 
-const sdk = new LicenseSeat({ apiKey: 'your-key' });
+const sdk = new LicenseSeat({
+  apiKey: 'your-key',
+  productSlug: 'your-product'
+});
 ```
 
 ### For TypeScript Users
@@ -491,7 +591,10 @@ The package includes TypeScript declarations (`.d.ts` files) automatically. No a
 import LicenseSeat from '@licenseseat/js';
 
 // Types are automatically available
-const sdk = new LicenseSeat({ apiKey: 'your-key' });
+const sdk = new LicenseSeat({
+  apiKey: 'your-key',
+  productSlug: 'your-product'
+});
 
 // Import specific types if needed
 import type {
@@ -500,7 +603,10 @@ import type {
   EntitlementCheckResult,
   LicenseStatus,
   Entitlement,
-  CachedLicense
+  CachedLicense,
+  ActivationResponse,
+  DeactivationResponse,
+  OfflineToken
 } from '@licenseseat/js';
 ```
 
@@ -520,6 +626,7 @@ Use ES modules via CDN:
 
     const sdk = new LicenseSeat({
       apiKey: 'your-api-key',
+      productSlug: 'your-product',
       debug: true
     });
 
@@ -681,7 +788,7 @@ Once published to npm, the package is automatically available on CDNs:
 **Version pinning** (recommended for production):
 ```html
 <script type="module">
-  import LicenseSeat from 'https://esm.sh/@licenseseat/js@0.2.0';
+  import LicenseSeat from 'https://esm.sh/@licenseseat/js@0.3.0';
 </script>
 ```
 
@@ -711,7 +818,10 @@ This creates `dist/index.global.js`:
 ```html
 <script src="/path/to/index.global.js"></script>
 <script>
-  const sdk = new LicenseSeat({ apiKey: 'your-key' });
+  const sdk = new LicenseSeat({
+    apiKey: 'your-key',
+    productSlug: 'your-product'
+  });
 </script>
 ```
 
@@ -727,22 +837,80 @@ This project follows [Semantic Versioning](https://semver.org/):
 
 ---
 
-## Migration from v0.1.x
+## Migration from v0.2.x
 
-### Breaking Changes in v0.2.0
+### Breaking Changes in v0.3.0
 
-| Change                           | Before | After                         | Migration                                                       |
-| -------------------------------- | ------ | ----------------------------- | --------------------------------------------------------------- |
-| `apiBaseUrl` default             | `/api` | `https://licenseseat.com/api` | Set `apiBaseUrl` explicitly if using a relative URL             |
-| `offlineFallbackEnabled` default | `true` | `false`                       | Set `offlineFallbackEnabled: true` if you need offline fallback |
+This version introduces the v1 API with significant changes:
 
-### New Features in v0.2.0
+| Change                           | Before (v0.2.x)                 | After (v0.3.0)                            |
+| -------------------------------- | ------------------------------- | ----------------------------------------- |
+| `productSlug` config             | Not required                    | **Required** for all API operations       |
+| `apiBaseUrl` default             | `https://licenseseat.com/api`   | `https://licenseseat.com/api/v1`          |
+| `deviceIdentifier` option        | `deviceIdentifier`              | `deviceId`                                |
+| `device_identifier` field        | `device_identifier`             | `device_id`                               |
+| Deactivation response            | Returns full activation object  | Returns `{ object, activation_id, deactivated_at }` |
+| `getOfflineLicense()` method     | Available                       | Renamed to `getOfflineToken()`            |
+| `getPublicKey()` method          | Available                       | Renamed to `getSigningKey()`              |
+| Offline license structure        | Legacy format                   | New token/signature/canonical format      |
+| Error format                     | Various                         | `{ error: { code, message, details? } }`  |
 
-- `hasEntitlement(key)` method for simple boolean checks
-- `autoInitialize` config option for lazy initialization
-- Full TypeScript support with auto-generated `.d.ts` files
-- Singleton pattern with `configure()` and `getSharedInstance()`
-- New error classes: `LicenseError`, `ConfigurationError`, `CryptoError`
+### Migration Steps
+
+1. **Add `productSlug` to configuration:**
+   ```javascript
+   // Before
+   const sdk = new LicenseSeat({ apiKey: 'key' });
+
+   // After
+   const sdk = new LicenseSeat({
+     apiKey: 'key',
+     productSlug: 'your-product'  // Required!
+   });
+   ```
+
+2. **Update activation options:**
+   ```javascript
+   // Before
+   await sdk.activate('KEY', { deviceIdentifier: 'id' });
+
+   // After
+   await sdk.activate('KEY', { deviceId: 'id' });
+   ```
+
+3. **Update response field access:**
+   ```javascript
+   // Before
+   const result = await sdk.activate('KEY');
+   console.log(result.device_identifier);
+
+   // After
+   const result = await sdk.activate('KEY');
+   console.log(result.device_id);
+   ```
+
+4. **Update deactivation handling:**
+   ```javascript
+   // Before
+   const result = await sdk.deactivate();
+   console.log(result.license_key);
+
+   // After
+   const result = await sdk.deactivate();
+   console.log(result.activation_id);
+   console.log(result.deactivated_at);
+   ```
+
+5. **Update offline method calls:**
+   ```javascript
+   // Before
+   await sdk.getOfflineLicense(key);
+   await sdk.getPublicKey(keyId);
+
+   // After
+   await sdk.getOfflineToken(key);
+   await sdk.getSigningKey(keyId);
+   ```
 
 ---
 

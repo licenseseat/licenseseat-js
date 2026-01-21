@@ -12,9 +12,9 @@ import {
 
 describe("Utility Functions", () => {
   describe("parseActiveEntitlements", () => {
-    it("should parse active_ents format", () => {
+    it("should parse entitlements format (primary)", () => {
       const payload = {
-        active_ents: [
+        entitlements: [
           {
             key: "pro",
             expires_at: "2025-12-31T23:59:59Z",
@@ -31,7 +31,7 @@ describe("Utility Functions", () => {
       expect(result[0].metadata).toEqual({ tier: 1 });
     });
 
-    it("should parse active_entitlements format", () => {
+    it("should parse active_entitlements format (fallback)", () => {
       const payload = {
         active_entitlements: [{ key: "beta", expires_at: null, metadata: null }],
       };
@@ -44,7 +44,7 @@ describe("Utility Functions", () => {
 
     it("should handle missing optional fields", () => {
       const payload = {
-        active_ents: [{ key: "basic" }],
+        entitlements: [{ key: "basic" }],
       };
 
       const result = parseActiveEntitlements(payload);

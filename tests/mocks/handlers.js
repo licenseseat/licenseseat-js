@@ -1,11 +1,11 @@
 /**
  * MSW (Mock Service Worker) request handlers for testing
- * These handlers mock the LicenseSeat API endpoints.
+ * These handlers mock the LicenseSeat API v1 endpoints.
  */
 
 import { http, HttpResponse } from "msw";
 
-const API_BASE = "https://licenseseat.com/api";
+const API_BASE = "https://licenseseat.com/api/v1";
 
 /**
  * Mock data for testing
@@ -17,104 +17,148 @@ export const mockData = {
   deviceId: "web-test-device-123",
   apiKey: "test-api-key-12345",
   keyId: "test-key-id-001",
+  productSlug: "test-product",
   // Mock Ed25519 public key (base64)
   publicKey: "MCowBQYDK2VwAyEAQHPaREiwn31mN8k/q9jtV7yMt0vOKNmAOCKvpBCp8YQ=",
 };
 
 /**
- * Mock activation response
+ * Mock license object (new v1 format)
  */
-const mockActivationResponse = {
-  id: "act_123456",
-  license_key: mockData.validLicenseKey,
-  device_identifier: mockData.deviceId,
-  activated_at: new Date().toISOString(),
+const mockLicenseObject = {
+  key: mockData.validLicenseKey,
+  status: "active",
+  starts_at: new Date().toISOString(),
+  expires_at: null,
+  mode: "hardware_locked",
+  plan_key: "pro",
+  seat_limit: 3,
+  active_seats: 1,
+  active_entitlements: [
+    {
+      key: "pro",
+      expires_at: null,
+      metadata: null,
+    },
+    {
+      key: "beta",
+      expires_at: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
+      metadata: null,
+    },
+  ],
   metadata: {},
+  product: {
+    slug: mockData.productSlug,
+    name: "Test Product",
+  },
 };
 
 /**
- * Mock validation response (valid license)
- * API returns { valid: true, license: { ... } } structure
+ * Mock activation response (new v1 format)
+ */
+const mockActivationResponse = {
+  object: "activation",
+  id: 123,
+  device_id: mockData.deviceId,
+  device_name: null,
+  license_key: mockData.validLicenseKey,
+  activated_at: new Date().toISOString(),
+  deactivated_at: null,
+  ip_address: "127.0.0.1",
+  metadata: {},
+  license: mockLicenseObject,
+};
+
+/**
+ * Mock validation response (new v1 format - valid)
  */
 const mockValidValidationResponse = {
+  object: "validation_result",
   valid: true,
-  license: {
+  license: mockLicenseObject,
+  activation: null,
+};
+
+/**
+ * Mock deactivation response (new v1 format)
+ */
+const mockDeactivationResponse = {
+  object: "deactivation",
+  activation_id: 123,
+  deactivated_at: new Date().toISOString(),
+};
+
+/**
+ * Mock offline token response (new v1 format)
+ */
+const mockOfflineTokenResponse = {
+  object: "offline_token",
+  token: {
+    schema_version: 1,
     license_key: mockData.validLicenseKey,
-    status: "active",
-    starts_at: new Date().toISOString(),
-    ends_at: null,
-    mode: "hardware_locked",
+    product_slug: mockData.productSlug,
     plan_key: "pro",
+    mode: "hardware_locked",
     seat_limit: 3,
-    active_activations_count: 1,
-    active_entitlements: [
+    device_id: mockData.deviceId,
+    iat: Math.floor(Date.now() / 1000),
+    exp: Math.floor(Date.now() / 1000) + 30 * 24 * 60 * 60, // 30 days
+    nbf: Math.floor(Date.now() / 1000),
+    license_expires_at: null,
+    kid: mockData.keyId,
+    entitlements: [
       {
         key: "pro",
         expires_at: null,
-        metadata: null,
-      },
-      {
-        key: "beta",
-        expires_at: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(), // 30 days
-        metadata: null,
       },
     ],
     metadata: {},
-    product: {
-      slug: "test-product",
-      name: "Test Product",
-    },
   },
+  signature: {
+    algorithm: "Ed25519",
+    key_id: mockData.keyId,
+    value: "mockSignatureBase64Url",
+  },
+  canonical: '{"entitlements":[{"key":"pro"}],"exp":...,"iat":...,"kid":"test-key-id-001",...}',
 };
 
 /**
- * Mock validation response (invalid license)
- * API returns { error: "...", reason_code: "..." } for errors
+ * Mock signing key response (new v1 format)
  */
-const mockInvalidValidationResponse = {
-  error: "License key not found.",
-  reason_code: "license_not_found",
+const mockSigningKeyResponse = {
+  object: "signing_key",
+  key_id: mockData.keyId,
+  algorithm: "Ed25519",
+  public_key: mockData.publicKey,
+  created_at: "2026-01-01T00:00:00Z",
+  status: "active",
 };
 
 /**
- * Mock offline license response
+ * Mock health response (new v1 format)
  */
-const mockOfflineLicenseResponse = {
-  payload: {
-    v: 1,
-    lic_k: mockData.validLicenseKey,
-    prod_s: "test-product",
-    plan_k: "pro",
-    exp_at: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString(), // 1 year
-    kid: mockData.keyId,
-    sl: 3, // seat_limit
-    active_ents: [
-      {
-        key: "pro",
-        expires_at: null,
-        metadata: null,
-      },
-    ],
-  },
-  signature_b64u: "mockSignatureBase64Url",
-  kid: mockData.keyId,
+const mockHealthResponse = {
+  object: "health",
+  status: "healthy",
+  api_version: "2026-01-21",
+  timestamp: new Date().toISOString(),
 };
 
 /**
  * API request handlers
  */
 export const handlers = [
-  // Heartbeat endpoint
-  http.get(`${API_BASE}/heartbeat`, () => {
-    return HttpResponse.json({ status: "ok", timestamp: Date.now() });
+  // Health endpoint
+  http.get(`${API_BASE}/health`, () => {
+    return HttpResponse.json(mockHealthResponse);
   }),
 
-  // Auth test endpoint
+  // Auth test endpoint (internal use)
   http.get(`${API_BASE}/auth_test`, ({ request }) => {
     const authHeader = request.headers.get("Authorization");
     if (!authHeader || !authHeader.startsWith("Bearer ")) {
       return HttpResponse.json(
-        { error: "Unauthorized", code: "unauthorized" },
+        { error: { code: "unauthorized", message: "Unauthorized" } },
         { status: 401 }
       );
     }
@@ -124,127 +168,132 @@ export const handlers = [
     });
   }),
 
-  // Activation endpoint
-  http.post(`${API_BASE}/activations/activate`, async ({ request }) => {
-    const authHeader = request.headers.get("Authorization");
-    if (!authHeader || !authHeader.startsWith("Bearer ")) {
-      return HttpResponse.json(
-        { error: "Unauthorized", code: "unauthorized" },
-        { status: 401 }
-      );
-    }
+  // Signing keys endpoint
+  http.get(`${API_BASE}/signing-keys/:keyId`, ({ params }) => {
+    const { keyId } = params;
 
-    const body = await request.json();
-    const { license_key, device_identifier } = body;
-
-    if (license_key === mockData.invalidLicenseKey) {
+    if (keyId !== mockData.keyId) {
       return HttpResponse.json(
-        { error: "Invalid license key", code: "invalid_license" },
+        { error: { code: "signing_key_not_found", message: "Signing key not found for the provided key_id." } },
         { status: 404 }
       );
     }
 
-    if (license_key === mockData.expiredLicenseKey) {
+    return HttpResponse.json(mockSigningKeyResponse);
+  }),
+
+  // Activation endpoint - POST /products/{slug}/licenses/{key}/activate
+  http.post(`${API_BASE}/products/:slug/licenses/:key/activate`, async ({ request, params }) => {
+    const authHeader = request.headers.get("Authorization");
+    if (!authHeader || !authHeader.startsWith("Bearer ")) {
       return HttpResponse.json(
-        { error: "License has expired", code: "license_expired" },
+        { error: { code: "unauthorized", message: "Unauthorized" } },
+        { status: 401 }
+      );
+    }
+
+    const { key } = params;
+    const body = await request.json();
+    const { device_id } = body;
+
+    if (key === mockData.invalidLicenseKey) {
+      return HttpResponse.json(
+        { error: { code: "license_not_found", message: "License not found" } },
+        { status: 404 }
+      );
+    }
+
+    if (key === mockData.expiredLicenseKey) {
+      return HttpResponse.json(
+        { error: { code: "license_expired", message: "License has expired" } },
         { status: 422 }
       );
     }
 
     return HttpResponse.json({
       ...mockActivationResponse,
-      license_key,
-      device_identifier: device_identifier || mockData.deviceId,
-    });
+      license_key: key,
+      device_id: device_id || mockData.deviceId,
+      license: {
+        ...mockLicenseObject,
+        key: key,
+      },
+    }, { status: 201 });
   }),
 
-  // Deactivation endpoint
-  http.post(`${API_BASE}/activations/deactivate`, async ({ request }) => {
+  // Deactivation endpoint - POST /products/{slug}/licenses/{key}/deactivate
+  http.post(`${API_BASE}/products/:slug/licenses/:key/deactivate`, async ({ request }) => {
     const authHeader = request.headers.get("Authorization");
     if (!authHeader || !authHeader.startsWith("Bearer ")) {
       return HttpResponse.json(
-        { error: "Unauthorized", code: "unauthorized" },
+        { error: { code: "unauthorized", message: "Unauthorized" } },
         { status: 401 }
       );
     }
 
-    const body = await request.json();
-
-    // Return the deactivated activation object (matching actual API response)
-    return HttpResponse.json({
-      id: "act_123456",
-      device_identifier: body.device_identifier || mockData.deviceId,
-      activated_at: new Date(Date.now() - 86400000).toISOString(), // 1 day ago
-      deactivated_at: new Date().toISOString(),
-      ip_address: "127.0.0.1",
-      metadata: {},
-      license_key: body.license_key,
-    });
+    return HttpResponse.json(mockDeactivationResponse);
   }),
 
-  // Validation endpoint
-  http.post(`${API_BASE}/licenses/validate`, async ({ request }) => {
-    const body = await request.json();
-    const { license_key } = body;
-
-    if (license_key === mockData.invalidLicenseKey) {
-      return HttpResponse.json(mockInvalidValidationResponse, { status: 404 });
+  // Validation endpoint - POST /products/{slug}/licenses/{key}/validate
+  http.post(`${API_BASE}/products/:slug/licenses/:key/validate`, async ({ request, params }) => {
+    const authHeader = request.headers.get("Authorization");
+    if (!authHeader || !authHeader.startsWith("Bearer ")) {
+      return HttpResponse.json(
+        { error: { code: "unauthorized", message: "Unauthorized" } },
+        { status: 401 }
+      );
     }
 
-    if (license_key === mockData.expiredLicenseKey) {
+    const { key } = params;
+
+    if (key === mockData.invalidLicenseKey) {
       return HttpResponse.json(
-        {
-          error: "License has expired.",
-          reason_code: "expired",
-        },
+        { error: { code: "license_not_found", message: "License key not found." } },
+        { status: 404 }
+      );
+    }
+
+    if (key === mockData.expiredLicenseKey) {
+      return HttpResponse.json(
+        { error: { code: "license_expired", message: "License has expired." } },
         { status: 422 }
       );
     }
 
-    // Return proper nested structure: { valid: true, license: { ... } }
     return HttpResponse.json({
-      valid: true,
+      ...mockValidValidationResponse,
       license: {
-        ...mockValidValidationResponse.license,
-        license_key,
+        ...mockLicenseObject,
+        key: key,
       },
     });
   }),
 
-  // Offline license endpoint
-  http.post(`${API_BASE}/licenses/:licenseKey/offline_license`, ({ params }) => {
-    const { licenseKey } = params;
-
-    if (licenseKey === mockData.invalidLicenseKey) {
+  // Offline token endpoint - POST /products/{slug}/licenses/{key}/offline-token
+  http.post(`${API_BASE}/products/:slug/licenses/:key/offline-token`, async ({ request, params }) => {
+    const authHeader = request.headers.get("Authorization");
+    if (!authHeader || !authHeader.startsWith("Bearer ")) {
       return HttpResponse.json(
-        { error: "License not found", code: "not_found" },
+        { error: { code: "unauthorized", message: "Unauthorized" } },
+        { status: 401 }
+      );
+    }
+
+    const { key } = params;
+
+    if (key === mockData.invalidLicenseKey) {
+      return HttpResponse.json(
+        { error: { code: "license_not_found", message: "License not found" } },
         { status: 404 }
       );
     }
 
     return HttpResponse.json({
-      ...mockOfflineLicenseResponse,
-      payload: {
-        ...mockOfflineLicenseResponse.payload,
-        lic_k: licenseKey,
+      ...mockOfflineTokenResponse,
+      token: {
+        ...mockOfflineTokenResponse.token,
+        license_key: key,
       },
-    });
-  }),
-
-  // Public key endpoint
-  http.get(`${API_BASE}/public_keys/:keyId`, ({ params }) => {
-    const { keyId } = params;
-
-    if (keyId !== mockData.keyId) {
-      return HttpResponse.json(
-        { error: "Key not found", code: "not_found" },
-        { status: 404 }
-      );
-    }
-
-    return HttpResponse.json({
-      key_id: keyId,
-      public_key_b64: mockData.publicKey,
     });
   }),
 ];
