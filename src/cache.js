@@ -62,12 +62,12 @@ export class LicenseCache {
   }
 
   /**
-   * Get the device identifier from the cached license
-   * @returns {string|null} Device identifier or null if not found
+   * Get the device ID from the cached license
+   * @returns {string|null} Device ID or null if not found
    */
   getDeviceId() {
     const license = this.getLicense();
-    return license ? license.device_identifier : null;
+    return license ? license.device_id : null;
   }
 
   /**
@@ -79,41 +79,41 @@ export class LicenseCache {
   }
 
   /**
-   * Get the cached offline license
-   * @returns {import('./types.js').SignedOfflineLicense|null} Offline license or null if not found
+   * Get the cached offline token
+   * @returns {import('./types.js').OfflineToken|null} Offline token or null if not found
    */
-  getOfflineLicense() {
+  getOfflineToken() {
     try {
-      const data = localStorage.getItem(this.prefix + "offline_license");
+      const data = localStorage.getItem(this.prefix + "offline_token");
       return data ? JSON.parse(data) : null;
     } catch (e) {
-      console.error("Failed to read offline license cache:", e);
+      console.error("Failed to read offline token cache:", e);
       return null;
     }
   }
 
   /**
-   * Store offline license data in cache
-   * @param {import('./types.js').SignedOfflineLicense} data - Signed offline license to cache
+   * Store offline token data in cache
+   * @param {import('./types.js').OfflineToken} data - Offline token to cache
    * @returns {void}
    */
-  setOfflineLicense(data) {
+  setOfflineToken(data) {
     try {
       localStorage.setItem(
-        this.prefix + "offline_license",
+        this.prefix + "offline_token",
         JSON.stringify(data)
       );
     } catch (e) {
-      console.error("Failed to cache offline license:", e);
+      console.error("Failed to cache offline token:", e);
     }
   }
 
   /**
-   * Clear the cached offline license
+   * Clear the cached offline token
    * @returns {void}
    */
-  clearOfflineLicense() {
-    localStorage.removeItem(this.prefix + "offline_license");
+  clearOfflineToken() {
+    localStorage.removeItem(this.prefix + "offline_token");
   }
 
   /**
@@ -161,8 +161,6 @@ export class LicenseCache {
         localStorage.removeItem(key);
       }
     });
-    this.clearOfflineLicense();
-    localStorage.removeItem(this.prefix + "last_seen_ts");
   }
 
   /**

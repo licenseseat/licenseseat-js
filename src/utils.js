@@ -8,11 +8,12 @@ import CJSON from "canonical-json";
 
 /**
  * Parse active entitlements from a raw API payload into a consistent shape
- * @param {Object} [payload={}] - Raw payload from API or offline license
+ * @param {Object} [payload={}] - Raw payload from API or offline token
  * @returns {import('./types.js').Entitlement[]} Normalized entitlements array
  */
 export function parseActiveEntitlements(payload = {}) {
-  const raw = payload.active_ents || payload.active_entitlements || [];
+  // New v1 API uses "entitlements" or "active_entitlements"
+  const raw = payload.entitlements || payload.active_entitlements || [];
   return raw.map((e) => ({
     key: e.key,
     expires_at: e.expires_at ?? null,

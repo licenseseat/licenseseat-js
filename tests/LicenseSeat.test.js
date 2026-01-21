@@ -15,6 +15,7 @@ describe("LicenseSeatSDK", () => {
     // Create SDK instance with auto-initialize disabled for controlled testing
     sdk = new LicenseSeatSDK({
       apiKey: mockData.apiKey,
+      productSlug: mockData.productSlug,
       autoInitialize: false,
       debug: false,
     });
@@ -24,7 +25,7 @@ describe("LicenseSeatSDK", () => {
     it("should use default configuration values", () => {
       const defaultSdk = new LicenseSeatSDK({ autoInitialize: false });
 
-      expect(defaultSdk.config.apiBaseUrl).toBe("https://licenseseat.com/api");
+      expect(defaultSdk.config.apiBaseUrl).toBe("https://licenseseat.com/api/v1");
       expect(defaultSdk.config.storagePrefix).toBe("licenseseat_");
       expect(defaultSdk.config.autoValidateInterval).toBe(3600000);
       expect(defaultSdk.config.offlineFallbackEnabled).toBe(false);
@@ -58,7 +59,7 @@ describe("LicenseSeatSDK", () => {
 
       expect(result).toBeDefined();
       expect(result.license_key).toBe(mockData.validLicenseKey);
-      expect(result.device_identifier).toBeDefined();
+      expect(result.device_id).toBeDefined();
       expect(result.activated_at).toBeDefined();
     });
 
@@ -91,14 +92,14 @@ describe("LicenseSeatSDK", () => {
       expect(cached.license_key).toBe(mockData.validLicenseKey);
     });
 
-    it("should use custom device identifier if provided", async () => {
+    it("should use custom device ID if provided", async () => {
       const customDeviceId = "custom-device-12345";
 
       const result = await sdk.activate(mockData.validLicenseKey, {
-        deviceIdentifier: customDeviceId,
+        deviceId: customDeviceId,
       });
 
-      expect(result.device_identifier).toBe(customDeviceId);
+      expect(result.device_id).toBe(customDeviceId);
     });
   });
 
@@ -198,9 +199,10 @@ describe("LicenseSeatSDK", () => {
       const result = await sdk.deactivate();
 
       expect(result).toBeDefined();
-      // API returns the deactivated activation object with deactivated_at set
+      // API returns the deactivation object with activation_id and deactivated_at
+      expect(result.object).toBe("deactivation");
       expect(result.deactivated_at).toBeDefined();
-      expect(result.license_key).toBe(mockData.validLicenseKey);
+      expect(result.activation_id).toBeDefined();
     });
 
     it("should clear cached license after deactivation", async () => {
@@ -242,7 +244,7 @@ describe("LicenseSeatSDK", () => {
       // Manually set license without validation
       sdk.cache.setLicense({
         license_key: mockData.validLicenseKey,
-        device_identifier: "test-device",
+        device_id: "test-device",
         activated_at: new Date().toISOString(),
         last_validated: new Date().toISOString(),
       });
@@ -337,7 +339,10 @@ describe("LicenseSeatSDK", () => {
     });
 
     it("should throw ConfigurationError when API key is not configured", async () => {
-      const noAuthSdk = new LicenseSeatSDK({ autoInitialize: false });
+      const noAuthSdk = new LicenseSeatSDK({
+        productSlug: mockData.productSlug,
+        autoInitialize: false,
+      });
 
       await expect(noAuthSdk.testAuth()).rejects.toThrow(
         "API key is required for auth test"
