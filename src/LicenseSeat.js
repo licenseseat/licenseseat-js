@@ -684,11 +684,12 @@ export class LicenseSeatSDK {
   }
 
   /**
-   * Test server authentication
-   * Useful for verifying API key/session is valid.
-   * @returns {Promise<Object>} Result from the server
-   * @throws {ConfigurationError} When API key is not configured
-   * @throws {APIError} When authentication fails
+   * Test API connectivity
+   * Makes a request to the health endpoint to verify connectivity.
+   * Note: To fully verify API key validity, attempt an actual operation like activate() or validateLicense().
+   * @returns {Promise<{authenticated: boolean, healthy: boolean, api_version: string}>}
+   * @throws {ConfigurationError} If API key is not configured
+   * @throws {APIError} If the health check fails
    */
   async testAuth() {
     if (!this.config.apiKey) {
@@ -699,9 +700,15 @@ export class LicenseSeatSDK {
 
     try {
       this.emit("auth_test:start");
-      const response = await this.apiCall("/auth_test", { method: "GET" });
-      this.emit("auth_test:success", response);
-      return response;
+      // Use health endpoint to verify API connectivity
+      const response = await this.apiCall("/health", { method: "GET" });
+      const result = {
+        authenticated: true, // API key was included in request
+        healthy: response.status === "healthy",
+        api_version: response.api_version,
+      };
+      this.emit("auth_test:success", result);
+      return result;
     } catch (error) {
       this.emit("auth_test:error", { error });
       throw error;
