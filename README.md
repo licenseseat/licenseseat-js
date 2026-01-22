@@ -248,9 +248,11 @@ console.log(result);
 
 ### Entitlement Methods
 
+> **Note:** Entitlements are optional. A license may have zero entitlements if the associated plan has no entitlements configured. The `active_entitlements` array may be empty or the field may be undefined/null.
+
 #### `sdk.hasEntitlement(key)`
 
-Check if an entitlement is active. Returns a simple boolean.
+Check if an entitlement is active. Returns a simple boolean. Returns `false` if no entitlements exist.
 
 ```javascript
 if (sdk.hasEntitlement('pro')) {
@@ -308,16 +310,20 @@ console.log(status);
 
 #### `sdk.testAuth()`
 
-Test API authentication (useful for verifying API key).
+Test API connectivity by calling the `/health` endpoint. Returns health status and API version.
 
 ```javascript
 try {
   const result = await sdk.testAuth();
-  console.log('Authenticated:', result.authenticated);
+  console.log('Authenticated:', result.authenticated);  // Always true if request succeeds
+  console.log('Healthy:', result.healthy);              // API health status
+  console.log('API Version:', result.api_version);      // e.g., '1.0.0'
 } catch (error) {
-  console.error('Auth failed:', error);
+  console.error('Connection failed:', error);
 }
 ```
+
+> **Note:** This method tests API connectivity, not API key validity. A successful response means the API is reachable. Authentication errors will surface when calling protected endpoints like `activate()` or `validateLicense()`.
 
 #### `sdk.reset()`
 
@@ -465,6 +471,70 @@ if (result.offline) {
 3. When offline, the SDK verifies the signature locally
 4. Clock tamper detection prevents users from bypassing expiration
 
+### Offline Methods
+
+#### `sdk.syncOfflineAssets()`
+
+Fetches the offline token and signing key from the server. Uses the currently cached license. Call this after activation to prepare for offline usage.
+
+```javascript
+// First activate (caches the license)
+await sdk.activate('LICENSE-KEY');
+
+// Then sync offline assets (uses cached license)
+const assets = await sdk.syncOfflineAssets();
+console.log('Offline token key ID:', assets.kid);
+console.log('Expires at:', assets.exp_at);
+```
+
+#### `sdk.getOfflineToken()`
+
+Fetches a signed offline token for the currently cached license. Returns the token structure containing the license data and Ed25519 signature.
+
+```javascript
+// Must have an active license cached first
+const token = await sdk.getOfflineToken();
+console.log(token);
+// {
+//   object: 'offline_token',
+//   token: { license_key, product_slug, plan_key, ... },
+//   signature: { algorithm: 'Ed25519', key_id, value },
+//   canonical: '...'
+// }
+```
+
+#### `sdk.getSigningKey(keyId)`
+
+Fetches the Ed25519 public key used for verifying offline token signatures.
+
+```javascript
+const signingKey = await sdk.getSigningKey('key-id-001');
+console.log(signingKey);
+// {
+//   object: 'signing_key',
+//   kid: 'key-id-001',
+//   public_key: 'base64-encoded-public-key',
+//   algorithm: 'Ed25519',
+//   created_at: '2024-01-01T00:00:00Z'
+// }
+```
+
+#### `sdk.verifyOfflineToken(token, publicKeyB64)`
+
+Verifies an offline token's Ed25519 signature locally. **Both parameters are required.**
+
+```javascript
+// Fetch the token and signing key first
+const token = await sdk.getOfflineToken();
+const signingKey = await sdk.getSigningKey(token.signature.key_id);
+
+// Verify the signature
+const isValid = await sdk.verifyOfflineToken(token, signingKey.public_key);
+console.log('Signature valid:', isValid);
+```
+
+> **Important:** The `verifyOfflineToken()` method requires you to pass both the token and the public key. Fetch the signing key using `getSigningKey()` with the `key_id` from the token's signature.
+
 ### Offline Token Structure
 
 ```javascript
@@ -564,7 +634,39 @@ Common error codes:
 
 - **Modern browsers**: Chrome 80+, Firefox 75+, Safari 14+, Edge 80+
 - **Bundlers**: Vite, Webpack, Rollup, esbuild, Parcel
-- **Node.js**: 18+ (requires polyfills for `localStorage`, `document`)
+- **Node.js**: 18+ (requires polyfills - see below)
+
+### Node.js Usage
+
+The SDK is designed for browsers but works in Node.js with polyfills. Add these before importing the SDK:
+
+```javascript
+// Required polyfills for Node.js
+const storage = {};
+globalThis.localStorage = {
+  getItem(key) { return Object.prototype.hasOwnProperty.call(storage, key) ? storage[key] : null; },
+  setItem(key, value) { storage[key] = String(value); },
+  removeItem(key) { delete storage[key]; },
+  clear() { for (const key in storage) delete storage[key]; },
+};
+
+// Override Object.keys to support localStorage iteration (used by cache.getAllKeys())
+const originalKeys = Object.keys;
+Object.keys = function(obj) {
+  if (obj === globalThis.localStorage) return originalKeys(storage);
+  return originalKeys(obj);
+};
+
+// Device fingerprinting polyfills (provides stable fallback values)
+globalThis.document = { createElement: () => ({ getContext: () => null }), querySelector: () => null };
+globalThis.window = { navigator: {}, screen: {} };
+globalThis.navigator = { userAgent: 'Node.js', language: 'en', hardwareConcurrency: 4 };
+
+// Now import the SDK
+const { default: LicenseSeat } = await import('@licenseseat/js');
+```
+
+> **Note:** In Node.js, device fingerprinting will use fallback values since browser APIs aren't available. For consistent device identification across restarts, pass an explicit `deviceId` to `activate()`.
 
 ---
 
@@ -680,6 +782,50 @@ npm install
 | `npm run test:coverage` | Run tests with coverage report            |
 | `npm run typecheck`     | Type-check without emitting               |
 
+### Integration Tests
+
+The SDK includes comprehensive integration tests that run against the live LicenseSeat API. These tests verify real-world functionality including activation, validation, deactivation, and offline cryptographic operations.
+
+#### Running Integration Tests (Node.js)
+
+```bash
+# Set environment variables
+export LICENSESEAT_API_KEY="ls_your_api_key_here"
+export LICENSESEAT_PRODUCT_SLUG="your-product"
+export LICENSESEAT_LICENSE_KEY="YOUR-LICENSE-KEY"
+
+# Run the tests
+node test-live.mjs
+```
+
+Or with inline environment variables:
+
+```bash
+LICENSESEAT_API_KEY=ls_xxx LICENSESEAT_PRODUCT_SLUG=my-app LICENSESEAT_LICENSE_KEY=XXX-XXX node test-live.mjs
+```
+
+#### Running Integration Tests (Browser)
+
+Open `test-live.html` in a browser. You'll be prompted to enter your credentials:
+
+1. **API Key** - Your LicenseSeat API key (starts with `ls_`)
+2. **Product Slug** - Your product identifier
+3. **License Key** - A valid license key for testing
+
+Credentials are stored in `localStorage` for convenience during development.
+
+#### What the Integration Tests Cover
+
+| Category | Tests |
+|----------|-------|
+| **Initialization** | SDK setup, configuration defaults |
+| **Activation** | License activation, device ID generation |
+| **Validation** | Online validation, entitlement checking |
+| **Deactivation** | License deactivation, cache clearing |
+| **Offline Crypto** | Ed25519 signature verification, offline token fetching, tamper detection |
+| **Error Handling** | Invalid licenses, missing config |
+| **Singleton** | Shared instance pattern |
+
 ### Project Structure
 
 ```
@@ -691,11 +837,13 @@ licenseseat-js/
 │   ├── errors.js         # Error classes
 │   ├── types.js          # JSDoc type definitions
 │   └── utils.js          # Utility functions
-├── tests/
+├── tests/                # Unit tests (mocked API)
 │   ├── setup.js          # Test setup
 │   ├── mocks/            # MSW handlers
 │   ├── LicenseSeat.test.js
 │   └── utils.test.js
+├── test-live.mjs         # Integration tests (Node.js)
+├── test-live.html        # Integration tests (Browser)
 ├── dist/                 # Build output
 │   ├── index.js          # ESM bundle
 │   └── types/            # TypeScript declarations
@@ -907,8 +1055,8 @@ This version introduces the v1 API with significant changes:
    await sdk.getOfflineLicense(key);
    await sdk.getPublicKey(keyId);
 
-   // After
-   await sdk.getOfflineToken(key);
+   // After (note: getOfflineToken uses cached license, no parameter needed)
+   await sdk.getOfflineToken();
    await sdk.getSigningKey(keyId);
    ```
 

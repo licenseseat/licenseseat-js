@@ -169,7 +169,7 @@ export const handlers = [
   }),
 
   // Signing keys endpoint
-  http.get(`${API_BASE}/signing-keys/:keyId`, ({ params }) => {
+  http.get(`${API_BASE}/signing_keys/:keyId`, ({ params }) => {
     const { keyId } = params;
 
     if (keyId !== mockData.keyId) {
@@ -269,8 +269,8 @@ export const handlers = [
     });
   }),
 
-  // Offline token endpoint - POST /products/{slug}/licenses/{key}/offline-token
-  http.post(`${API_BASE}/products/:slug/licenses/:key/offline-token`, async ({ request, params }) => {
+  // Offline token endpoint - POST /products/{slug}/licenses/{key}/offline_token
+  http.post(`${API_BASE}/products/:slug/licenses/:key/offline_token`, async ({ request, params }) => {
     const authHeader = request.headers.get("Authorization");
     if (!authHeader || !authHeader.startsWith("Bearer ")) {
       return HttpResponse.json(

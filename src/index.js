@@ -5,7 +5,7 @@
  * for apps, games, and plugins.
  *
  * @module @licenseseat/js
- * @version 0.2.0
+ * @version 0.3.0
  *
  * @example
  * ```js
@@ -13,6 +13,7 @@
  *
  * const sdk = new LicenseSeat({
  *   apiKey: 'your-api-key',
+ *   productSlug: 'your-product',  // Required: your product slug
  *   debug: true
  * });
  *
