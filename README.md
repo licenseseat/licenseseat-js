@@ -1055,8 +1055,8 @@ This version introduces the v1 API with significant changes:
    await sdk.getOfflineLicense(key);
    await sdk.getPublicKey(keyId);
 
-   // After
-   await sdk.getOfflineToken(key);
+   // After (note: getOfflineToken uses cached license, no parameter needed)
+   await sdk.getOfflineToken();
    await sdk.getSigningKey(keyId);
    ```
 
