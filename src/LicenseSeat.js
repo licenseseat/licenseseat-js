@@ -527,8 +527,8 @@ export class LicenseSeatSDK {
         body.ttl_days = options.ttlDays;
       }
 
-      // New v1 API: POST /products/{slug}/licenses/{key}/offline-token
-      const path = `/products/${this.config.productSlug}/licenses/${encodeURIComponent(license.license_key)}/offline-token`;
+      // New v1 API: POST /products/{slug}/licenses/{key}/offline_token
+      const path = `/products/${this.config.productSlug}/licenses/${encodeURIComponent(license.license_key)}/offline_token`;
 
       const response = await this.apiCall(path, {
         method: "POST",
@@ -565,8 +565,8 @@ export class LicenseSeatSDK {
     }
     try {
       this.log(`Fetching signing key for kid: ${keyId}`);
-      // New v1 API: GET /signing-keys/{key_id}
-      const response = await this.apiCall(`/signing-keys/${encodeURIComponent(keyId)}`, {
+      // New v1 API: GET /signing_keys/{key_id}
+      const response = await this.apiCall(`/signing_keys/${encodeURIComponent(keyId)}`, {
         method: "GET",
       });
       if (response && response.public_key) {
