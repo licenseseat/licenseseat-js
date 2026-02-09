@@ -28,9 +28,7 @@ function detectOSName() {
   // Browser: prefer userAgentData when available
   if (typeof navigator !== "undefined") {
     if (navigator.userAgentData && navigator.userAgentData.platform) {
-      const p = navigator.userAgentData.platform;
-      if (p === "macOS" || p === "Windows" || p === "Linux") return p;
-      return p;
+      return navigator.userAgentData.platform;
     }
 
     const ua = navigator.userAgent || "";
@@ -434,15 +432,15 @@ function detectBrowserVersion() {
     // Fallback: parse user agent
     const ua = navigator.userAgent || "";
     const patterns = [
-      [/Edg\/([\d.]+)/, null],
-      [/OPR\/([\d.]+)/, null],
-      [/Firefox\/([\d.]+)/, null],
-      [/SamsungBrowser\/([\d.]+)/, null],
-      [/CriOS\/([\d.]+)/, null],
-      [/Chrome\/([\d.]+)/, null],
-      [/Version\/([\d.]+).*Safari/, null],
+      /Edg\/([\d.]+)/,
+      /OPR\/([\d.]+)/,
+      /Firefox\/([\d.]+)/,
+      /SamsungBrowser\/([\d.]+)/,
+      /CriOS\/([\d.]+)/,
+      /Chrome\/([\d.]+)/,
+      /Version\/([\d.]+).*Safari/,
     ];
-    for (const [re] of patterns) {
+    for (const re of patterns) {
       const m = ua.match(re);
       if (m) return m[1];
     }

@@ -17,6 +17,11 @@ describe("collectTelemetry", () => {
     expect(result.sdk_version).toBe("1.2.3");
   });
 
+  it("should include sdk_name hardcoded to 'js'", () => {
+    const result = collectTelemetry("1.0.0");
+    expect(result.sdk_name).toBe("js");
+  });
+
   it("should include platform field", () => {
     const result = collectTelemetry("1.0.0");
     expect(result.platform).toBeDefined();
@@ -223,6 +228,8 @@ describe("collectTelemetry", () => {
     const result = collectTelemetry("1.0.0", { appVersion: "1.0.0", appBuild: "1" });
 
     // These keys must always be present (Node.js environment)
+    expect(result).toHaveProperty("sdk_name");
+    expect(result.sdk_name).toBe("js");
     expect(result).toHaveProperty("sdk_version");
     expect(result).toHaveProperty("os_name");
     expect(result).toHaveProperty("platform");
