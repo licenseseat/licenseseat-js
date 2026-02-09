@@ -4,7 +4,7 @@
  * These tests use Vitest and MSW to mock HTTP requests.
  */
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { LicenseSeatSDK, SDK_VERSION } from "../src/LicenseSeat.js";
 import { mockData } from "./mocks/handlers.js";
 
@@ -13,12 +13,19 @@ describe("LicenseSeatSDK", () => {
 
   beforeEach(() => {
     // Create SDK instance with auto-initialize disabled for controlled testing
+    // Disable heartbeat timer to avoid background activity in tests
     sdk = new LicenseSeatSDK({
       apiKey: mockData.apiKey,
       productSlug: mockData.productSlug,
       autoInitialize: false,
+      heartbeatInterval: 0,
       debug: false,
     });
+  });
+
+  afterEach(() => {
+    // Ensure all timers are stopped to avoid leaks
+    if (sdk) sdk.destroy();
   });
 
   describe("Configuration", () => {
@@ -402,6 +409,7 @@ describe("LicenseSeatSDK", () => {
     it("should default telemetryEnabled to true", () => {
       const defaultSdk = new LicenseSeatSDK({ autoInitialize: false });
       expect(defaultSdk.config.telemetryEnabled).toBe(true);
+      defaultSdk.destroy();
     });
 
     it("should allow disabling telemetry", () => {
@@ -410,6 +418,117 @@ describe("LicenseSeatSDK", () => {
         autoInitialize: false,
       });
       expect(noTelemetrySdk.config.telemetryEnabled).toBe(false);
+      noTelemetrySdk.destroy();
+    });
+  });
+
+  describe("App Version / App Build Config", () => {
+    it("should default appVersion and appBuild to null", () => {
+      const defaultSdk = new LicenseSeatSDK({ autoInitialize: false });
+      expect(defaultSdk.config.appVersion).toBeNull();
+      expect(defaultSdk.config.appBuild).toBeNull();
+      defaultSdk.destroy();
+    });
+
+    it("should accept appVersion and appBuild in config", () => {
+      const customSdk = new LicenseSeatSDK({
+        appVersion: "2.1.0",
+        appBuild: "42",
+        autoInitialize: false,
+      });
+      expect(customSdk.config.appVersion).toBe("2.1.0");
+      expect(customSdk.config.appBuild).toBe("42");
+      customSdk.destroy();
+    });
+  });
+
+  describe("Heartbeat Timer", () => {
+    it("should default heartbeatInterval to 300000 (5 minutes)", () => {
+      const defaultSdk = new LicenseSeatSDK({ autoInitialize: false });
+      expect(defaultSdk.config.heartbeatInterval).toBe(300000);
+      defaultSdk.destroy();
+    });
+
+    it("should allow custom heartbeatInterval", () => {
+      const customSdk = new LicenseSeatSDK({
+        heartbeatInterval: 60000,
+        autoInitialize: false,
+      });
+      expect(customSdk.config.heartbeatInterval).toBe(60000);
+      customSdk.destroy();
+    });
+
+    it("should not start heartbeat timer when heartbeatInterval is 0", async () => {
+      const noHeartbeatSdk = new LicenseSeatSDK({
+        apiKey: mockData.apiKey,
+        productSlug: mockData.productSlug,
+        heartbeatInterval: 0,
+        autoInitialize: false,
+      });
+
+      await noHeartbeatSdk.activate(mockData.validLicenseKey);
+      expect(noHeartbeatSdk.heartbeatTimer).toBeNull();
+      noHeartbeatSdk.destroy();
+    });
+
+    it("should start heartbeat timer on activation when interval > 0", async () => {
+      const heartbeatSdk = new LicenseSeatSDK({
+        apiKey: mockData.apiKey,
+        productSlug: mockData.productSlug,
+        heartbeatInterval: 60000,
+        autoInitialize: false,
+      });
+
+      await heartbeatSdk.activate(mockData.validLicenseKey);
+      expect(heartbeatSdk.heartbeatTimer).not.toBeNull();
+      heartbeatSdk.destroy();
+    });
+
+    it("should stop heartbeat timer on reset", async () => {
+      const heartbeatSdk = new LicenseSeatSDK({
+        apiKey: mockData.apiKey,
+        productSlug: mockData.productSlug,
+        heartbeatInterval: 60000,
+        autoInitialize: false,
+      });
+
+      await heartbeatSdk.activate(mockData.validLicenseKey);
+      expect(heartbeatSdk.heartbeatTimer).not.toBeNull();
+
+      heartbeatSdk.reset();
+      expect(heartbeatSdk.heartbeatTimer).toBeNull();
+      heartbeatSdk.destroy();
+    });
+
+    it("should stop heartbeat timer on destroy", async () => {
+      const heartbeatSdk = new LicenseSeatSDK({
+        apiKey: mockData.apiKey,
+        productSlug: mockData.productSlug,
+        heartbeatInterval: 60000,
+        autoInitialize: false,
+      });
+
+      await heartbeatSdk.activate(mockData.validLicenseKey);
+      expect(heartbeatSdk.heartbeatTimer).not.toBeNull();
+
+      heartbeatSdk.destroy();
+      expect(heartbeatSdk.heartbeatTimer).toBeNull();
+    });
+
+    it("should stop heartbeat timer on deactivate", async () => {
+      const heartbeatSdk = new LicenseSeatSDK({
+        apiKey: mockData.apiKey,
+        productSlug: mockData.productSlug,
+        heartbeatInterval: 60000,
+        autoInitialize: false,
+      });
+
+      await heartbeatSdk.activate(mockData.validLicenseKey);
+      expect(heartbeatSdk.heartbeatTimer).not.toBeNull();
+
+      await heartbeatSdk.deactivate();
+      expect(heartbeatSdk.heartbeatTimer).toBeNull();
+      heartbeatSdk.destroy();
     });
   });
 

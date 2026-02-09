@@ -48,6 +48,7 @@ const DEFAULT_CONFIG = {
   productSlug: null, // Required: Product slug for API calls (e.g., "my-app")
   storagePrefix: "licenseseat_",
   autoValidateInterval: 3600000, // 1 hour
+  heartbeatInterval: 300000, // 5 minutes
   networkRecheckInterval: 30000, // 30 seconds
   maxRetries: 3,
   retryDelay: 1000,
@@ -59,6 +60,8 @@ const DEFAULT_CONFIG = {
   maxClockSkewMs: 5 * 60 * 1000, // 5 minutes
   autoInitialize: true,
   telemetryEnabled: true, // Set false to disable telemetry (e.g. for GDPR compliance)
+  appVersion: null, // User-provided app version, sent as app_version in telemetry
+  appBuild: null, // User-provided app build, sent as app_build in telemetry
 };
 
 /**
@@ -111,6 +114,13 @@ export class LicenseSeatSDK {
      * @private
      */
     this.validationTimer = null;
+
+    /**
+     * Heartbeat timer ID (separate from auto-validation)
+     * @type {ReturnType<typeof setInterval>|null}
+     * @private
+     */
+    this.heartbeatTimer = null;
 
     /**
      * License cache manager
@@ -213,9 +223,10 @@ export class LicenseSeatSDK {
           .catch(() => {});
       }
 
-      // Start auto-validation if API key is configured
+      // Start auto-validation and heartbeat if API key is configured
       if (this.config.apiKey) {
         this.startAutoValidation(cachedLicense.license_key);
+        this.startHeartbeat();
 
         // Validate in background
         this.validateLicense(cachedLicense.license_key).catch((err) => {
@@ -286,6 +297,7 @@ export class LicenseSeatSDK {
       this.cache.setLicense(licenseData);
       this.cache.updateValidation({ valid: true, optimistic: true });
       this.startAutoValidation(licenseKey);
+      this.startHeartbeat();
       this.syncOfflineAssets();
       this.scheduleOfflineRefresh();
 
@@ -331,6 +343,7 @@ export class LicenseSeatSDK {
       this.cache.clearLicense();
       this.cache.clearOfflineToken();
       this.stopAutoValidation();
+      this.stopHeartbeat();
 
       this.emit("deactivation:success", response);
       return response;
@@ -762,6 +775,7 @@ export class LicenseSeatSDK {
    */
   reset() {
     this.stopAutoValidation();
+    this.stopHeartbeat();
     this.stopConnectivityPolling();
     if (this.offlineRefreshTimer) {
       clearInterval(this.offlineRefreshTimer);
@@ -782,6 +796,7 @@ export class LicenseSeatSDK {
   destroy() {
     this.destroyed = true;
     this.stopAutoValidation();
+    this.stopHeartbeat();
     this.stopConnectivityPolling();
     if (this.offlineRefreshTimer) {
       clearInterval(this.offlineRefreshTimer);
@@ -899,6 +914,42 @@ export class LicenseSeatSDK {
       clearInterval(this.validationTimer);
       this.validationTimer = null;
       this.emit("autovalidation:stopped");
+    }
+  }
+
+  /**
+   * Start separate heartbeat timer
+   * Sends periodic heartbeats between auto-validation cycles.
+   * @returns {void}
+   * @private
+   */
+  startHeartbeat() {
+    this.stopHeartbeat();
+
+    const interval = this.config.heartbeatInterval;
+    if (!interval || interval <= 0) {
+      this.log("Heartbeat timer disabled (interval:", interval, ")");
+      return;
+    }
+
+    this.heartbeatTimer = setInterval(() => {
+      this.heartbeat()
+        .then(() => this.emit("heartbeat:cycle", { nextRunAt: new Date(Date.now() + interval) }))
+        .catch((err) => this.log("Heartbeat timer failed:", err));
+    }, interval);
+
+    this.log("Heartbeat timer started (interval:", interval, "ms)");
+  }
+
+  /**
+   * Stop the separate heartbeat timer
+   * @returns {void}
+   * @private
+   */
+  stopHeartbeat() {
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = null;
     }
   }
 
@@ -1184,7 +1235,10 @@ export class LicenseSeatSDK {
     const method = options.method || "GET";
     let body = options.body;
     if (method === "POST" && body && this.config.telemetryEnabled !== false) {
-      body = { ...body, telemetry: collectTelemetry(SDK_VERSION) };
+      body = { ...body, telemetry: collectTelemetry(SDK_VERSION, {
+        appVersion: this.config.appVersion,
+        appBuild: this.config.appBuild,
+      }) };
     }
 
     for (let attempt = 0; attempt <= this.config.maxRetries; attempt++) {
