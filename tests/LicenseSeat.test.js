@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { LicenseSeatSDK } from "../src/LicenseSeat.js";
+import { LicenseSeatSDK, SDK_VERSION } from "../src/LicenseSeat.js";
 import { mockData } from "./mocks/handlers.js";
 
 describe("LicenseSeatSDK", () => {
@@ -354,6 +354,70 @@ describe("LicenseSeatSDK", () => {
       } catch (err) {
         expect(err.name).toBe("ConfigurationError");
       }
+    });
+  });
+
+  describe("Heartbeat", () => {
+    beforeEach(async () => {
+      await sdk.activate(mockData.validLicenseKey);
+    });
+
+    it("should send a heartbeat successfully", async () => {
+      const result = await sdk.heartbeat();
+
+      expect(result).toBeDefined();
+      expect(result.object).toBe("heartbeat");
+      expect(result.received_at).toBeDefined();
+    });
+
+    it("should emit heartbeat:success event", async () => {
+      const handler = vi.fn();
+      sdk.on("heartbeat:success", handler);
+
+      await sdk.heartbeat();
+
+      expect(handler).toHaveBeenCalledOnce();
+    });
+
+    it("should return undefined when no license is cached", async () => {
+      sdk.cache.clearLicense();
+
+      const result = await sdk.heartbeat();
+      expect(result).toBeUndefined();
+    });
+
+    it("should throw when productSlug is not configured", async () => {
+      const noSlugSdk = new LicenseSeatSDK({
+        apiKey: mockData.apiKey,
+        autoInitialize: false,
+      });
+
+      await expect(noSlugSdk.heartbeat()).rejects.toThrow(
+        "productSlug is required for heartbeat"
+      );
+    });
+  });
+
+  describe("Telemetry", () => {
+    it("should default telemetryEnabled to true", () => {
+      const defaultSdk = new LicenseSeatSDK({ autoInitialize: false });
+      expect(defaultSdk.config.telemetryEnabled).toBe(true);
+    });
+
+    it("should allow disabling telemetry", () => {
+      const noTelemetrySdk = new LicenseSeatSDK({
+        telemetryEnabled: false,
+        autoInitialize: false,
+      });
+      expect(noTelemetrySdk.config.telemetryEnabled).toBe(false);
+    });
+  });
+
+  describe("SDK Version", () => {
+    it("should export SDK_VERSION", () => {
+      expect(SDK_VERSION).toBeDefined();
+      expect(typeof SDK_VERSION).toBe("string");
+      expect(SDK_VERSION).toBe("0.4.0");
     });
   });
 });

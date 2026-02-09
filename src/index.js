@@ -31,9 +31,10 @@
  * ```
  */
 
-// Re-export the main SDK class
+// Re-export the main SDK class and version
 export {
   LicenseSeatSDK,
+  SDK_VERSION,
   getSharedInstance,
   configure,
   resetSharedInstance,
@@ -57,6 +58,9 @@ export {
   generateDeviceId,
   getCsrfToken,
 } from "./utils.js";
+
+// Re-export telemetry collection (for advanced use cases)
+export { collectTelemetry } from "./telemetry.js";
 
 // Default export - the main SDK class
 import { LicenseSeatSDK } from "./LicenseSeat.js";
