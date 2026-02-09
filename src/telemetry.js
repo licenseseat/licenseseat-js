@@ -488,6 +488,7 @@ export function collectTelemetry(sdkVersion, options) {
 
   const raw = {
     sdk_version: sdkVersion,
+    sdk_name: 'js',
     os_name: detectOSName(),
     os_version: detectOSVersion(),
     platform: detectPlatform(),
