@@ -862,6 +862,12 @@ export class LicenseSeatSDK {
     this.currentAutoLicenseKey = licenseKey;
     const validationInterval = this.config.autoValidateInterval;
 
+    // Don't start auto-validation if interval is 0 or negative
+    if (!validationInterval || validationInterval <= 0) {
+      this.log("Auto-validation disabled (interval:", validationInterval, ")");
+      return;
+    }
+
     const performAndReschedule = () => {
       this.validateLicense(licenseKey)
         .then(() => {
@@ -907,10 +913,12 @@ export class LicenseSeatSDK {
     const healthCheck = async () => {
       try {
         // New v1 API: GET /health
-        await fetch(`${this.config.apiBaseUrl}/health`, {
+        const res = await fetch(`${this.config.apiBaseUrl}/health`, {
           method: "GET",
           credentials: "omit",
         });
+        // Consume the response body to release the connection
+        await res.text().catch(() => {});
 
         if (!this.online) {
           this.online = true;
