@@ -13,6 +13,8 @@ The official JavaScript/TypeScript SDK for [LicenseSeat](https://licenseseat.com
 - **License activation & deactivation** – Activate licenses with automatic device fingerprinting
 - **Online & offline validation** – Validate licenses with optional offline fallback
 - **Entitlement checking** – Check feature access with `hasEntitlement()` and `checkEntitlement()`
+- **Heartbeat** – Automatic periodic heartbeats to report device activity
+- **Telemetry** – Auto-collected device and environment data sent with each API request
 - **Local caching** – Secure localStorage-based caching with clock tamper detection
 - **Auto-retry with exponential backoff** – Resilient network handling
 - **Event-driven architecture** – Subscribe to SDK lifecycle events
@@ -138,6 +140,14 @@ const sdk = new LicenseSeat({
   autoValidateInterval: 3600000,              // 1 hour (in ms)
   autoInitialize: true,                       // Auto-validate cached license on init
 
+  // Heartbeat
+  heartbeatInterval: 300000,                  // 5 minutes (in ms), 0 to disable
+
+  // Telemetry
+  telemetryEnabled: true,                     // Set false to disable (e.g. GDPR)
+  appVersion: '1.2.0',                        // Your app version (sent in telemetry)
+  appBuild: '42',                             // Your app build number (sent in telemetry)
+
   // Offline Support
   offlineFallbackEnabled: false,              // Enable offline validation fallback
   maxOfflineDays: 0,                          // Max days offline (0 = disabled)
@@ -164,6 +174,10 @@ const sdk = new LicenseSeat({
 | `storagePrefix`          | `string`  | `'licenseseat_'`                   | Prefix for localStorage keys                              |
 | `autoValidateInterval`   | `number`  | `3600000`                          | Auto-validation interval in ms (1 hour)                   |
 | `autoInitialize`         | `boolean` | `true`                             | Auto-initialize and validate cached license               |
+| `heartbeatInterval`      | `number`  | `300000`                           | Heartbeat interval in ms (5 minutes). Set `0` to disable  |
+| `telemetryEnabled`       | `boolean` | `true`                             | Enable telemetry collection. Set `false` for GDPR compliance |
+| `appVersion`             | `string`  | `null`                             | Your app version string (sent as `app_version` in telemetry) |
+| `appBuild`               | `string`  | `null`                             | Your app build identifier (sent as `app_build` in telemetry) |
 | `offlineFallbackEnabled` | `boolean` | `false`                            | Enable offline validation on network errors               |
 | `maxOfflineDays`         | `number`  | `0`                                | Maximum days license works offline (0 = disabled)         |
 | `maxRetries`             | `number`  | `3`                                | Max retry attempts for failed API calls                   |
@@ -325,6 +339,23 @@ try {
 
 > **Note:** This method tests API connectivity, not API key validity. A successful response means the API is reachable. Authentication errors will surface when calling protected endpoints like `activate()` or `validateLicense()`.
 
+#### `sdk.heartbeat()`
+
+Send a heartbeat to report that the current device is still active. Heartbeats are sent automatically at the configured `heartbeatInterval`, but you can also send one manually.
+
+```javascript
+try {
+  const result = await sdk.heartbeat();
+  console.log('Heartbeat received at:', result.received_at);
+} catch (error) {
+  console.error('Heartbeat failed:', error);
+}
+```
+
+Returns `undefined` if no active license is cached. When auto-heartbeat is enabled (the default), the SDK sends heartbeats every 5 minutes while a license is active. Auto-heartbeat starts automatically after `activate()` or when the SDK initializes with a cached license.
+
+To disable auto-heartbeat, set `heartbeatInterval: 0` in the configuration.
+
 #### `sdk.reset()`
 
 Clear all cached data and reset SDK state.
@@ -403,6 +434,9 @@ sdk.off('activation:success', handler);
 | **Auto-Validation**                 |                                     |                                 |
 | `autovalidation:cycle`              | Auto-validation scheduled           | `{ nextRunAt: Date }`           |
 | `autovalidation:stopped`            | Auto-validation stopped             | –                               |
+| **Heartbeat**                       |                                     |                                 |
+| `heartbeat:success`                 | Heartbeat acknowledged by server    | `HeartbeatResponse`             |
+| `heartbeat:cycle`                   | Auto-heartbeat tick completed       | `{ nextRunAt: Date }`           |
 | **Network**                         |                                     |                                 |
 | `network:online`                    | Network connectivity restored       | –                               |
 | `network:offline`                   | Network connectivity lost           | `{ error }`                     |
@@ -565,6 +599,126 @@ console.log('Signature valid:', isValid);
   canonical: '{"entitlements":[...],"exp":...}'
 }
 ```
+
+---
+
+## Telemetry
+
+The SDK automatically collects non-PII (non-personally-identifiable) device and environment data and includes it with every POST request sent to the LicenseSeat API. This data helps you understand what platforms and environments your customers use.
+
+Telemetry is **enabled by default** and can be disabled at any time.
+
+### Collected Fields
+
+| Field                | Type     | Example                | Description                                      |
+| -------------------- | -------- | ---------------------- | ------------------------------------------------ |
+| `sdk_name`           | `string` | `"js"`                 | Always `"js"` for this SDK                       |
+| `sdk_version`        | `string` | `"0.4.0"`              | SDK version                                      |
+| `os_name`            | `string` | `"macOS"`              | Operating system name                            |
+| `os_version`         | `string` | `"14.2.1"`             | Operating system version                         |
+| `platform`           | `string` | `"browser"`            | Runtime platform (`browser`, `node`, `electron`, `react-native`, `deno`, `bun`) |
+| `device_model`       | `string` | `null`                 | Device model (Chromium userAgentData only)        |
+| `device_type`        | `string` | `"desktop"`            | Device type (`desktop`, `phone`, `tablet`, `server`) |
+| `locale`             | `string` | `"en-US"`              | Full locale string                               |
+| `timezone`           | `string` | `"America/New_York"`   | IANA timezone                                    |
+| `language`           | `string` | `"en"`                 | 2-letter language code                           |
+| `architecture`       | `string` | `"arm64"`              | CPU architecture                                 |
+| `cpu_cores`          | `number` | `10`                   | Number of logical CPU cores                      |
+| `memory_gb`          | `number` | `16`                   | Approximate RAM in GB (Chrome/Node.js only)      |
+| `screen_resolution`  | `string` | `"1920x1080"`          | Screen resolution                                |
+| `display_scale`      | `number` | `2`                    | Device pixel ratio                               |
+| `browser_name`       | `string` | `"Chrome"`             | Browser name (browser environments only)         |
+| `browser_version`    | `string` | `"123.0"`              | Browser version (browser environments only)      |
+| `runtime_version`    | `string` | `"20.11.0"`            | Runtime version (Node.js, Deno, Bun, Electron)   |
+| `app_version`        | `string` | `"1.2.0"`              | Your app version (from `appVersion` config)      |
+| `app_build`          | `string` | `"42"`                 | Your app build (from `appBuild` config)          |
+
+Fields that cannot be detected in the current environment are omitted (not sent as `null`).
+
+### Providing App Version
+
+Pass your own app version and build number via configuration so they appear in telemetry:
+
+```javascript
+const sdk = new LicenseSeat({
+  apiKey: 'your-key',
+  productSlug: 'your-product',
+  appVersion: '1.2.0',
+  appBuild: '42'
+});
+```
+
+### Disabling Telemetry
+
+To disable telemetry collection entirely (for example, to comply with GDPR or other privacy regulations):
+
+```javascript
+const sdk = new LicenseSeat({
+  apiKey: 'your-key',
+  productSlug: 'your-product',
+  telemetryEnabled: false
+});
+```
+
+When telemetry is disabled, no device or environment data is attached to API requests.
+
+### Privacy
+
+Telemetry collects only non-personally-identifiable information. No IP addresses, user names, email addresses, or other PII are collected by the SDK. The data is used solely to help you understand the platforms and environments where your software is used.
+
+Telemetry is opt-out: set `telemetryEnabled: false` to disable it completely.
+
+---
+
+## Heartbeat
+
+The SDK sends periodic heartbeat signals to let the server know a device is still actively using the license. This enables usage analytics and helps detect inactive seats.
+
+### How It Works
+
+- After a license is activated (or when the SDK initializes with a cached license), a heartbeat timer starts automatically.
+- The default interval is **5 minutes** (`300000` ms), configurable via `heartbeatInterval`.
+- Each heartbeat sends the current `device_id` to the server.
+- Heartbeats also run alongside auto-validation cycles.
+
+### Manual Heartbeat
+
+You can send a heartbeat at any time:
+
+```javascript
+await sdk.heartbeat();
+```
+
+### Configuring the Interval
+
+```javascript
+const sdk = new LicenseSeat({
+  apiKey: 'your-key',
+  productSlug: 'your-product',
+  heartbeatInterval: 600000  // 10 minutes
+});
+```
+
+Set `heartbeatInterval: 0` to disable auto-heartbeat entirely. You can still call `sdk.heartbeat()` manually.
+
+### Heartbeat Events
+
+| Event               | Description                        | Data                    |
+| -------------------- | ---------------------------------- | ----------------------- |
+| `heartbeat:success`  | Heartbeat acknowledged by server   | `HeartbeatResponse`     |
+| `heartbeat:cycle`    | Auto-heartbeat tick completed      | `{ nextRunAt: Date }`   |
+
+```javascript
+sdk.on('heartbeat:success', (data) => {
+  console.log('Heartbeat received at:', data.received_at);
+});
+```
+
+### Heartbeat Lifecycle
+
+- **Starts** automatically after `sdk.activate()` succeeds, or on SDK init if a cached license exists.
+- **Stops** automatically when `sdk.deactivate()`, `sdk.reset()`, or `sdk.destroy()` is called.
+- Heartbeat failures are logged (in debug mode) but do not throw or interrupt the SDK.
 
 ---
 
@@ -833,6 +987,7 @@ licenseseat-js/
 ├── src/
 │   ├── index.js          # Entry point, exports
 │   ├── LicenseSeat.js    # Main SDK class
+│   ├── telemetry.js      # Telemetry collection (device/environment data)
 │   ├── cache.js          # LicenseCache (localStorage)
 │   ├── errors.js         # Error classes
 │   ├── types.js          # JSDoc type definitions
@@ -936,7 +1091,7 @@ Once published to npm, the package is automatically available on CDNs:
 **Version pinning** (recommended for production):
 ```html
 <script type="module">
-  import LicenseSeat from 'https://esm.sh/@licenseseat/js@0.3.0';
+  import LicenseSeat from 'https://esm.sh/@licenseseat/js@0.4.0';
 </script>
 ```
 

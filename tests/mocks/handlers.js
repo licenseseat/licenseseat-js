@@ -135,6 +135,15 @@ const mockSigningKeyResponse = {
 };
 
 /**
+ * Mock heartbeat response (new v1 format)
+ */
+const mockHeartbeatResponse = {
+  object: "heartbeat",
+  received_at: new Date().toISOString(),
+  license: mockLicenseObject,
+};
+
+/**
  * Mock health response (new v1 format)
  */
 const mockHealthResponse = {
@@ -267,6 +276,19 @@ export const handlers = [
         key: key,
       },
     });
+  }),
+
+  // Heartbeat endpoint - POST /products/{slug}/licenses/{key}/heartbeat
+  http.post(`${API_BASE}/products/:slug/licenses/:key/heartbeat`, async ({ request }) => {
+    const authHeader = request.headers.get("Authorization");
+    if (!authHeader || !authHeader.startsWith("Bearer ")) {
+      return HttpResponse.json(
+        { error: { code: "unauthorized", message: "Unauthorized" } },
+        { status: 401 }
+      );
+    }
+
+    return HttpResponse.json(mockHeartbeatResponse);
   }),
 
   // Offline token endpoint - POST /products/{slug}/licenses/{key}/offline_token

@@ -4,8 +4,8 @@
  * These tests use Vitest and MSW to mock HTTP requests.
  */
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
-import { LicenseSeatSDK } from "../src/LicenseSeat.js";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { LicenseSeatSDK, SDK_VERSION } from "../src/LicenseSeat.js";
 import { mockData } from "./mocks/handlers.js";
 
 describe("LicenseSeatSDK", () => {
@@ -13,12 +13,19 @@ describe("LicenseSeatSDK", () => {
 
   beforeEach(() => {
     // Create SDK instance with auto-initialize disabled for controlled testing
+    // Disable heartbeat timer to avoid background activity in tests
     sdk = new LicenseSeatSDK({
       apiKey: mockData.apiKey,
       productSlug: mockData.productSlug,
       autoInitialize: false,
+      heartbeatInterval: 0,
       debug: false,
     });
+  });
+
+  afterEach(() => {
+    // Ensure all timers are stopped to avoid leaks
+    if (sdk) sdk.destroy();
   });
 
   describe("Configuration", () => {
@@ -354,6 +361,321 @@ describe("LicenseSeatSDK", () => {
       } catch (err) {
         expect(err.name).toBe("ConfigurationError");
       }
+    });
+  });
+
+  describe("Heartbeat", () => {
+    beforeEach(async () => {
+      await sdk.activate(mockData.validLicenseKey);
+    });
+
+    it("should send a heartbeat successfully", async () => {
+      const result = await sdk.heartbeat();
+
+      expect(result).toBeDefined();
+      expect(result.object).toBe("heartbeat");
+      expect(result.received_at).toBeDefined();
+    });
+
+    it("should emit heartbeat:success event", async () => {
+      const handler = vi.fn();
+      sdk.on("heartbeat:success", handler);
+
+      await sdk.heartbeat();
+
+      expect(handler).toHaveBeenCalledOnce();
+    });
+
+    it("should return undefined when no license is cached", async () => {
+      sdk.cache.clearLicense();
+
+      const result = await sdk.heartbeat();
+      expect(result).toBeUndefined();
+    });
+
+    it("should throw when productSlug is not configured", async () => {
+      const noSlugSdk = new LicenseSeatSDK({
+        apiKey: mockData.apiKey,
+        autoInitialize: false,
+      });
+
+      await expect(noSlugSdk.heartbeat()).rejects.toThrow(
+        "productSlug is required for heartbeat"
+      );
+    });
+  });
+
+  describe("Telemetry", () => {
+    it("should default telemetryEnabled to true", () => {
+      const defaultSdk = new LicenseSeatSDK({ autoInitialize: false });
+      expect(defaultSdk.config.telemetryEnabled).toBe(true);
+      defaultSdk.destroy();
+    });
+
+    it("should allow disabling telemetry", () => {
+      const noTelemetrySdk = new LicenseSeatSDK({
+        telemetryEnabled: false,
+        autoInitialize: false,
+      });
+      expect(noTelemetrySdk.config.telemetryEnabled).toBe(false);
+      noTelemetrySdk.destroy();
+    });
+  });
+
+  describe("App Version / App Build Config", () => {
+    it("should default appVersion and appBuild to null", () => {
+      const defaultSdk = new LicenseSeatSDK({ autoInitialize: false });
+      expect(defaultSdk.config.appVersion).toBeNull();
+      expect(defaultSdk.config.appBuild).toBeNull();
+      defaultSdk.destroy();
+    });
+
+    it("should accept appVersion and appBuild in config", () => {
+      const customSdk = new LicenseSeatSDK({
+        appVersion: "2.1.0",
+        appBuild: "42",
+        autoInitialize: false,
+      });
+      expect(customSdk.config.appVersion).toBe("2.1.0");
+      expect(customSdk.config.appBuild).toBe("42");
+      customSdk.destroy();
+    });
+  });
+
+  describe("Heartbeat Timer", () => {
+    it("should default heartbeatInterval to 300000 (5 minutes)", () => {
+      const defaultSdk = new LicenseSeatSDK({ autoInitialize: false });
+      expect(defaultSdk.config.heartbeatInterval).toBe(300000);
+      defaultSdk.destroy();
+    });
+
+    it("should allow custom heartbeatInterval", () => {
+      const customSdk = new LicenseSeatSDK({
+        heartbeatInterval: 60000,
+        autoInitialize: false,
+      });
+      expect(customSdk.config.heartbeatInterval).toBe(60000);
+      customSdk.destroy();
+    });
+
+    it("should not start heartbeat timer when heartbeatInterval is 0", async () => {
+      const noHeartbeatSdk = new LicenseSeatSDK({
+        apiKey: mockData.apiKey,
+        productSlug: mockData.productSlug,
+        heartbeatInterval: 0,
+        autoInitialize: false,
+      });
+
+      await noHeartbeatSdk.activate(mockData.validLicenseKey);
+      expect(noHeartbeatSdk.heartbeatTimer).toBeNull();
+      noHeartbeatSdk.destroy();
+    });
+
+    it("should not start heartbeat timer when heartbeatInterval is negative", async () => {
+      const negativeSdk = new LicenseSeatSDK({
+        apiKey: mockData.apiKey,
+        productSlug: mockData.productSlug,
+        heartbeatInterval: -1000,
+        autoInitialize: false,
+      });
+
+      await negativeSdk.activate(mockData.validLicenseKey);
+      expect(negativeSdk.heartbeatTimer).toBeNull();
+      negativeSdk.destroy();
+    });
+
+    it("should start heartbeat timer on activation when interval > 0", async () => {
+      const heartbeatSdk = new LicenseSeatSDK({
+        apiKey: mockData.apiKey,
+        productSlug: mockData.productSlug,
+        heartbeatInterval: 60000,
+        autoInitialize: false,
+      });
+
+      await heartbeatSdk.activate(mockData.validLicenseKey);
+      expect(heartbeatSdk.heartbeatTimer).not.toBeNull();
+      heartbeatSdk.destroy();
+    });
+
+    it("should stop heartbeat timer on reset", async () => {
+      const heartbeatSdk = new LicenseSeatSDK({
+        apiKey: mockData.apiKey,
+        productSlug: mockData.productSlug,
+        heartbeatInterval: 60000,
+        autoInitialize: false,
+      });
+
+      await heartbeatSdk.activate(mockData.validLicenseKey);
+      expect(heartbeatSdk.heartbeatTimer).not.toBeNull();
+
+      heartbeatSdk.reset();
+      expect(heartbeatSdk.heartbeatTimer).toBeNull();
+      heartbeatSdk.destroy();
+    });
+
+    it("should stop heartbeat timer on destroy", async () => {
+      const heartbeatSdk = new LicenseSeatSDK({
+        apiKey: mockData.apiKey,
+        productSlug: mockData.productSlug,
+        heartbeatInterval: 60000,
+        autoInitialize: false,
+      });
+
+      await heartbeatSdk.activate(mockData.validLicenseKey);
+      expect(heartbeatSdk.heartbeatTimer).not.toBeNull();
+
+      heartbeatSdk.destroy();
+      expect(heartbeatSdk.heartbeatTimer).toBeNull();
+    });
+
+    it("should stop heartbeat timer on deactivate", async () => {
+      const heartbeatSdk = new LicenseSeatSDK({
+        apiKey: mockData.apiKey,
+        productSlug: mockData.productSlug,
+        heartbeatInterval: 60000,
+        autoInitialize: false,
+      });
+
+      await heartbeatSdk.activate(mockData.validLicenseKey);
+      expect(heartbeatSdk.heartbeatTimer).not.toBeNull();
+
+      await heartbeatSdk.deactivate();
+      expect(heartbeatSdk.heartbeatTimer).toBeNull();
+      heartbeatSdk.destroy();
+    });
+
+    it("should have heartbeatTimer null initially before activation", () => {
+      const freshSdk = new LicenseSeatSDK({
+        apiKey: mockData.apiKey,
+        productSlug: mockData.productSlug,
+        heartbeatInterval: 60000,
+        autoInitialize: false,
+      });
+      expect(freshSdk.heartbeatTimer).toBeNull();
+      freshSdk.destroy();
+    });
+
+    it("heartbeat timer should be independent from validation timer", async () => {
+      const bothSdk = new LicenseSeatSDK({
+        apiKey: mockData.apiKey,
+        productSlug: mockData.productSlug,
+        heartbeatInterval: 60000,
+        autoValidateInterval: 120000,
+        autoInitialize: false,
+      });
+
+      await bothSdk.activate(mockData.validLicenseKey);
+      // Both timers should be running
+      expect(bothSdk.heartbeatTimer).not.toBeNull();
+      expect(bothSdk.validationTimer).not.toBeNull();
+      // They should be different objects
+      expect(bothSdk.heartbeatTimer).not.toBe(bothSdk.validationTimer);
+      bothSdk.destroy();
+    });
+  });
+
+  describe("Telemetry payload integration", () => {
+    it("should include enriched telemetry fields in API request body", async () => {
+      // Intercept the request body to verify telemetry is attached
+      let capturedTelemetry = null;
+      const origFetch = globalThis.fetch;
+      const interceptFetch = vi.fn(async (url, options) => {
+        if (typeof url === "string" && url.includes("/validate") && options?.body) {
+          const body = JSON.parse(options.body);
+          capturedTelemetry = body.telemetry;
+        }
+        return origFetch(url, options);
+      });
+      globalThis.fetch = interceptFetch;
+
+      try {
+        await sdk.activate(mockData.validLicenseKey);
+        await sdk.validateLicense(mockData.validLicenseKey);
+
+        expect(capturedTelemetry).not.toBeNull();
+        expect(capturedTelemetry.sdk_version).toBeDefined();
+        expect(capturedTelemetry.platform).toBeDefined();
+        expect(capturedTelemetry.os_name).toBeDefined();
+        expect(capturedTelemetry.device_type).toBeDefined();
+        expect(capturedTelemetry.architecture).toBeDefined();
+        expect(capturedTelemetry.cpu_cores).toBeDefined();
+        expect(capturedTelemetry.runtime_version).toBeDefined();
+      } finally {
+        globalThis.fetch = origFetch;
+      }
+    });
+
+    it("should include app_version and app_build from config in telemetry payload", async () => {
+      let capturedTelemetry = null;
+      const origFetch = globalThis.fetch;
+      const interceptFetch = vi.fn(async (url, options) => {
+        if (typeof url === "string" && url.includes("/heartbeat") && options?.body) {
+          const body = JSON.parse(options.body);
+          capturedTelemetry = body.telemetry;
+        }
+        return origFetch(url, options);
+      });
+      globalThis.fetch = interceptFetch;
+
+      const appSdk = new LicenseSeatSDK({
+        apiKey: mockData.apiKey,
+        productSlug: mockData.productSlug,
+        appVersion: "5.0.0",
+        appBuild: "999",
+        autoInitialize: false,
+        heartbeatInterval: 0,
+      });
+
+      try {
+        await appSdk.activate(mockData.validLicenseKey);
+        await appSdk.heartbeat();
+
+        expect(capturedTelemetry).not.toBeNull();
+        expect(capturedTelemetry.app_version).toBe("5.0.0");
+        expect(capturedTelemetry.app_build).toBe("999");
+      } finally {
+        globalThis.fetch = origFetch;
+        appSdk.destroy();
+      }
+    });
+
+    it("should not include telemetry when telemetryEnabled is false", async () => {
+      let capturedBody = null;
+      const origFetch = globalThis.fetch;
+      const interceptFetch = vi.fn(async (url, options) => {
+        if (typeof url === "string" && url.includes("/heartbeat") && options?.body) {
+          capturedBody = JSON.parse(options.body);
+        }
+        return origFetch(url, options);
+      });
+      globalThis.fetch = interceptFetch;
+
+      const noTelSdk = new LicenseSeatSDK({
+        apiKey: mockData.apiKey,
+        productSlug: mockData.productSlug,
+        telemetryEnabled: false,
+        autoInitialize: false,
+        heartbeatInterval: 0,
+      });
+
+      try {
+        await noTelSdk.activate(mockData.validLicenseKey);
+        await noTelSdk.heartbeat();
+
+        expect(capturedBody).not.toBeNull();
+        expect(capturedBody.telemetry).toBeUndefined();
+      } finally {
+        globalThis.fetch = origFetch;
+        noTelSdk.destroy();
+      }
+    });
+  });
+
+  describe("SDK Version", () => {
+    it("should export SDK_VERSION", () => {
+      expect(SDK_VERSION).toBeDefined();
+      expect(typeof SDK_VERSION).toBe("string");
+      expect(SDK_VERSION).toBe("0.4.0");
     });
   });
 });

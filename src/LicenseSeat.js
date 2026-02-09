@@ -31,6 +31,13 @@ import {
   sleep,
   getCsrfToken,
 } from "./utils.js";
+import { collectTelemetry } from "./telemetry.js";
+
+/**
+ * SDK version constant
+ * @type {string}
+ */
+export const SDK_VERSION = "0.4.0";
 
 /**
  * Default configuration values
@@ -41,6 +48,7 @@ const DEFAULT_CONFIG = {
   productSlug: null, // Required: Product slug for API calls (e.g., "my-app")
   storagePrefix: "licenseseat_",
   autoValidateInterval: 3600000, // 1 hour
+  heartbeatInterval: 300000, // 5 minutes
   networkRecheckInterval: 30000, // 30 seconds
   maxRetries: 3,
   retryDelay: 1000,
@@ -51,6 +59,9 @@ const DEFAULT_CONFIG = {
   maxOfflineDays: 0, // 0 = disabled
   maxClockSkewMs: 5 * 60 * 1000, // 5 minutes
   autoInitialize: true,
+  telemetryEnabled: true, // Set false to disable telemetry (e.g. for GDPR compliance)
+  appVersion: null, // User-provided app version, sent as app_version in telemetry
+  appBuild: null, // User-provided app build, sent as app_build in telemetry
 };
 
 /**
@@ -103,6 +114,13 @@ export class LicenseSeatSDK {
      * @private
      */
     this.validationTimer = null;
+
+    /**
+     * Heartbeat timer ID (separate from auto-validation)
+     * @type {ReturnType<typeof setInterval>|null}
+     * @private
+     */
+    this.heartbeatTimer = null;
 
     /**
      * License cache manager
@@ -205,9 +223,10 @@ export class LicenseSeatSDK {
           .catch(() => {});
       }
 
-      // Start auto-validation if API key is configured
+      // Start auto-validation and heartbeat if API key is configured
       if (this.config.apiKey) {
         this.startAutoValidation(cachedLicense.license_key);
+        this.startHeartbeat();
 
         // Validate in background
         this.validateLicense(cachedLicense.license_key).catch((err) => {
@@ -278,6 +297,7 @@ export class LicenseSeatSDK {
       this.cache.setLicense(licenseData);
       this.cache.updateValidation({ valid: true, optimistic: true });
       this.startAutoValidation(licenseKey);
+      this.startHeartbeat();
       this.syncOfflineAssets();
       this.scheduleOfflineRefresh();
 
@@ -323,6 +343,7 @@ export class LicenseSeatSDK {
       this.cache.clearLicense();
       this.cache.clearOfflineToken();
       this.stopAutoValidation();
+      this.stopHeartbeat();
 
       this.emit("deactivation:success", response);
       return response;
@@ -716,11 +737,45 @@ export class LicenseSeatSDK {
   }
 
   /**
+   * Send a heartbeat for the current license.
+   * Heartbeats let the server know the device is still active.
+   * @returns {Promise<Object|undefined>} Heartbeat response, or undefined if no active license
+   * @throws {ConfigurationError} When productSlug is not configured
+   * @throws {APIError} When the API request fails
+   */
+  async heartbeat() {
+    if (!this.config.productSlug) {
+      throw new ConfigurationError("productSlug is required for heartbeat");
+    }
+
+    const cached = this.cache.getLicense();
+    if (!cached) {
+      this.log("No active license for heartbeat");
+      return;
+    }
+
+    const body = { device_id: cached.device_id };
+
+    const response = await this.apiCall(
+      `/products/${this.config.productSlug}/licenses/${encodeURIComponent(cached.license_key)}/heartbeat`,
+      {
+        method: "POST",
+        body: body,
+      }
+    );
+
+    this.emit("heartbeat:success", response);
+    this.log("Heartbeat sent successfully");
+    return response;
+  }
+
+  /**
    * Clear all data and reset SDK state
    * @returns {void}
    */
   reset() {
     this.stopAutoValidation();
+    this.stopHeartbeat();
     this.stopConnectivityPolling();
     if (this.offlineRefreshTimer) {
       clearInterval(this.offlineRefreshTimer);
@@ -741,6 +796,7 @@ export class LicenseSeatSDK {
   destroy() {
     this.destroyed = true;
     this.stopAutoValidation();
+    this.stopHeartbeat();
     this.stopConnectivityPolling();
     if (this.offlineRefreshTimer) {
       clearInterval(this.offlineRefreshTimer);
@@ -821,11 +877,21 @@ export class LicenseSeatSDK {
     this.currentAutoLicenseKey = licenseKey;
     const validationInterval = this.config.autoValidateInterval;
 
+    // Don't start auto-validation if interval is 0 or negative
+    if (!validationInterval || validationInterval <= 0) {
+      this.log("Auto-validation disabled (interval:", validationInterval, ")");
+      return;
+    }
+
     const performAndReschedule = () => {
-      this.validateLicense(licenseKey).catch((err) => {
-        this.log("Auto-validation failed:", err);
-        this.emit("validation:auto-failed", { licenseKey, error: err });
-      });
+      this.validateLicense(licenseKey)
+        .then(() => {
+          this.heartbeat().catch((err) => this.log("Heartbeat failed:", err));
+        })
+        .catch((err) => {
+          this.log("Auto-validation failed:", err);
+          this.emit("validation:auto-failed", { licenseKey, error: err });
+        });
       this.emit("autovalidation:cycle", {
         nextRunAt: new Date(Date.now() + validationInterval),
       });
@@ -852,6 +918,42 @@ export class LicenseSeatSDK {
   }
 
   /**
+   * Start separate heartbeat timer
+   * Sends periodic heartbeats between auto-validation cycles.
+   * @returns {void}
+   * @private
+   */
+  startHeartbeat() {
+    this.stopHeartbeat();
+
+    const interval = this.config.heartbeatInterval;
+    if (!interval || interval <= 0) {
+      this.log("Heartbeat timer disabled (interval:", interval, ")");
+      return;
+    }
+
+    this.heartbeatTimer = setInterval(() => {
+      this.heartbeat()
+        .then(() => this.emit("heartbeat:cycle", { nextRunAt: new Date(Date.now() + interval) }))
+        .catch((err) => this.log("Heartbeat timer failed:", err));
+    }, interval);
+
+    this.log("Heartbeat timer started (interval:", interval, "ms)");
+  }
+
+  /**
+   * Stop the separate heartbeat timer
+   * @returns {void}
+   * @private
+   */
+  stopHeartbeat() {
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = null;
+    }
+  }
+
+  /**
    * Start connectivity polling (when offline)
    * @returns {void}
    * @private
@@ -862,10 +964,12 @@ export class LicenseSeatSDK {
     const healthCheck = async () => {
       try {
         // New v1 API: GET /health
-        await fetch(`${this.config.apiBaseUrl}/health`, {
+        const res = await fetch(`${this.config.apiBaseUrl}/health`, {
           method: "GET",
           credentials: "omit",
         });
+        // Consume the response body to release the connection
+        await res.text().catch(() => {});
 
         if (!this.online) {
           this.online = true;
@@ -1127,12 +1231,22 @@ export class LicenseSeatSDK {
       );
     }
 
+    // Inject telemetry into POST request bodies
+    const method = options.method || "GET";
+    let body = options.body;
+    if (method === "POST" && body && this.config.telemetryEnabled !== false) {
+      body = { ...body, telemetry: collectTelemetry(SDK_VERSION, {
+        appVersion: this.config.appVersion,
+        appBuild: this.config.appBuild,
+      }) };
+    }
+
     for (let attempt = 0; attempt <= this.config.maxRetries; attempt++) {
       try {
         const response = await fetch(url, {
-          method: options.method || "GET",
+          method: method,
           headers: headers,
-          body: options.body ? JSON.stringify(options.body) : undefined,
+          body: body ? JSON.stringify(body) : undefined,
           credentials: "omit",
         });
 

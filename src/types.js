@@ -21,6 +21,10 @@
  * @property {number} [maxOfflineDays=0] - Maximum days a license can be used offline (0 = disabled)
  * @property {number} [maxClockSkewMs=300000] - Maximum allowed clock skew in ms for offline validation (default: 5 minutes)
  * @property {boolean} [autoInitialize=true] - Automatically initialize and validate cached license on construction
+ * @property {boolean} [telemetryEnabled=true] - Enable telemetry collection on POST requests (set false for GDPR compliance)
+ * @property {number} [heartbeatInterval=300000] - Interval in ms between automatic heartbeats (default: 5 minutes, set 0 to disable)
+ * @property {string} [appVersion] - User-provided app version string, sent as app_version in telemetry
+ * @property {string} [appBuild] - User-provided app build identifier, sent as app_build in telemetry
  */
 
 /**
@@ -196,6 +200,14 @@
  * @property {string} public_key - Base64-encoded public key
  * @property {string} [created_at] - ISO8601 creation timestamp
  * @property {string} status - Key status ("active", "revoked")
+ */
+
+/**
+ * Heartbeat response from the API
+ * @typedef {Object} HeartbeatResponse
+ * @property {string} object - Object type ("heartbeat")
+ * @property {string} received_at - ISO8601 timestamp of when the heartbeat was received
+ * @property {LicenseObject} license - The license object
  */
 
 /**
