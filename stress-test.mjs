@@ -3,8 +3,8 @@
  * LicenseSeat JS SDK — Telemetry, Heartbeat & Activation Stress Test
  *
  * Direct port of the Swift SDK StressTest (StressTest/Sources/StressTest/main.swift).
- * 9 scenarios: telemetry on/off, enriched telemetry fields, heartbeat timer,
- * auto-validation, concurrent stress, lifecycle, app_version/app_build.
+ * 11 scenarios: telemetry on/off, enriched telemetry fields, heartbeat timer,
+ * heartbeat disabled, auto-validation, concurrent stress, lifecycle, app_version/app_build.
  *
  * Setup:
  *   export LICENSESEAT_API_URL="http://localhost:3000/api/v1"   # optional
@@ -441,9 +441,49 @@ assert(heartbeatTimerSDK.heartbeatTimer === null, "Heartbeat timer stopped after
 heartbeatTimerSDK.destroy();
 
 // ============================================================
-// SCENARIO 8: Auto-validation with heartbeat
+// SCENARIO 8: heartbeatInterval=0 disables timer
 // ============================================================
-printHeader("SCENARIO 8: Auto-Validation + Heartbeat Cycles");
+printHeader("SCENARIO 8: heartbeatInterval=0 Disables Heartbeat Timer");
+
+const disabledHBSDK = new LicenseSeatSDK({
+  apiBaseUrl: API_URL,
+  apiKey: API_KEY,
+  productSlug: PRODUCT_SLUG,
+  storagePrefix: "stress_hb_disabled_",
+  autoValidateInterval: 0,
+  heartbeatInterval: 0, // explicitly disabled
+  autoInitialize: false,
+  debug: false,
+});
+disabledHBSDK.reset();
+
+printTest("Activate with heartbeatInterval=0");
+try {
+  await disabledHBSDK.activate(LICENSE_KEY);
+  pass("Activated");
+  assert(disabledHBSDK.heartbeatTimer === null, "Heartbeat timer is null (disabled by heartbeatInterval=0)");
+} catch (err) {
+  if (isAlreadyActivated(err)) {
+    pass("Already activated");
+    assert(disabledHBSDK.heartbeatTimer === null, "Heartbeat timer is null after already_activated");
+  } else {
+    fail(`Activate failed: ${err.message}`);
+  }
+}
+
+printTest("Wait 4s and verify no heartbeat:cycle events fire");
+let disabledCycleCount = 0;
+disabledHBSDK.on("heartbeat:cycle", () => { disabledCycleCount++; });
+await sleep(4000);
+assert(disabledCycleCount === 0, `No heartbeat cycles fired (${disabledCycleCount} observed)`);
+
+try { await disabledHBSDK.deactivate(); } catch {}
+disabledHBSDK.destroy();
+
+// ============================================================
+// SCENARIO 9: Auto-validation with heartbeat piggyback
+// ============================================================
+printHeader("SCENARIO 9: Auto-Validation + Heartbeat Piggyback");
 
 const autoSDK = new LicenseSeatSDK({
   apiBaseUrl: API_URL,
@@ -488,9 +528,9 @@ autoSDK.destroy();
 pass("Auto-validation SDK destroyed");
 
 // ============================================================
-// SCENARIO 9: Concurrent validation stress
+// SCENARIO 10: Concurrent validation stress
 // ============================================================
-printHeader("SCENARIO 9: Concurrent Validation Stress");
+printHeader("SCENARIO 10: Concurrent Validation Stress");
 
 // Fresh SDK for concurrent tests (no auto-validation running)
 const concurrentSDK = new LicenseSeatSDK({
@@ -539,9 +579,9 @@ concurrentSDK.destroy();
 pass("Concurrent SDK cleaned up");
 
 // ============================================================
-// SCENARIO 10: Full lifecycle
+// SCENARIO 11: Full lifecycle
 // ============================================================
-printHeader("SCENARIO 10: Full Lifecycle (activate -> validate -> heartbeat -> deactivate)");
+printHeader("SCENARIO 11: Full Lifecycle (activate -> validate -> heartbeat -> deactivate)");
 
 const lifecycleSDK = new LicenseSeatSDK({
   apiBaseUrl: API_URL,
@@ -625,6 +665,7 @@ if (failedTests === 0) {
         - Telemetry disabled mode (activate/validate/heartbeat)
         - App version / app build in telemetry config
         - Separate heartbeat timer (independent from auto-validation)
+        - heartbeatInterval=0 disables timer (no cycles fire)
         - Auto-validation cycles with heartbeat piggyback
         - Concurrent validation and heartbeat stress
         - Full lifecycle (activate -> validate -> heartbeat -> deactivate)
