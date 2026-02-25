@@ -37,7 +37,7 @@ import { collectTelemetry } from "./telemetry.js";
  * SDK version constant
  * @type {string}
  */
-export const SDK_VERSION = "0.4.2";
+export const SDK_VERSION = "0.4.3";
 
 /**
  * Default configuration values
@@ -87,6 +87,12 @@ const DEFAULT_CONFIG = {
  * ```
  */
 export class LicenseSeatSDK {
+  /**
+   * SDK version (static property for easy access)
+   * @type {string}
+   */
+  static VERSION = SDK_VERSION;
+
   /**
    * Create a new LicenseSeat SDK instance
    * @param {import('./types.js').LicenseSeatConfig} [config={}] - Configuration options
@@ -553,7 +559,7 @@ export class LicenseSeatSDK {
 
       const response = await this.apiCall(path, {
         method: "POST",
-        body: Object.keys(body).length > 0 ? body : undefined,
+        body: body, // Always send body so telemetry gets included
       });
 
       this.emit("offlineToken:fetched", {
