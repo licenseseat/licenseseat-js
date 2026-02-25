@@ -37,7 +37,7 @@ import { collectTelemetry } from "./telemetry.js";
  * SDK version constant
  * @type {string}
  */
-export const SDK_VERSION = "0.4.1";
+export const SDK_VERSION = "0.4.2";
 
 /**
  * Default configuration values
