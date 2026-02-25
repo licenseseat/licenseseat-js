@@ -642,6 +642,78 @@ assert(eventLog.includes("activation:success") || eventLog.length === 0, "Activa
 assert(eventLog.includes("validation:success") || eventLog.length === 0, "Validation event logged");
 
 // ============================================================
+// SCENARIO 12: Offline Token Download & Verification
+// ============================================================
+printHeader("SCENARIO 12: Offline Token Download & Verification");
+
+const offlineSDK = new LicenseSeatSDK({
+  apiBaseUrl: API_URL,
+  apiKey: API_KEY,
+  productSlug: PRODUCT_SLUG,
+  storagePrefix: "stress_offline_",
+  autoValidateInterval: 0,
+  heartbeatInterval: 0,
+  autoInitialize: false,
+  debug: false,
+});
+offlineSDK.reset();
+
+printTest("Step 1: Activate");
+try {
+  await offlineSDK.activate(LICENSE_KEY);
+  pass("Activated for offline token test");
+} catch (err) {
+  if (isAlreadyActivated(err)) { pass("Already activated"); }
+  else { fail(`Activate: ${err.message}`); }
+}
+
+printTest("Step 2: Download offline token (getOfflineToken)");
+let offlineToken = null;
+try {
+  offlineToken = await offlineSDK.getOfflineToken();
+  assert(offlineToken !== null && offlineToken !== undefined, "Offline token fetched from API");
+  const kid = offlineToken.signature?.key_id || offlineToken.token?.kid;
+  log(`Offline token kid: ${kid ?? "none"}`);
+  log(`Token keys: ${Object.keys(offlineToken).join(", ")}`);
+  assert(kid !== undefined && kid !== null, "Offline token has a signing key ID");
+
+  // Cache it manually for verification step
+  offlineSDK.cache.setOfflineToken(offlineToken);
+
+  // Also fetch and cache the signing key
+  if (kid) {
+    const signingKey = await offlineSDK.getSigningKey(kid);
+    assert(signingKey && signingKey.public_key, "Signing key fetched from API");
+    offlineSDK.cache.setPublicKey(kid, signingKey.public_key);
+    log(`Public key cached for kid: ${kid}`);
+  }
+} catch (err) {
+  fail(`getOfflineToken failed: ${err.message}`);
+}
+
+printTest("Step 3: Verify cached offline token (verifyCachedOffline)");
+try {
+  const result = await offlineSDK.verifyCachedOffline();
+  assert(result.valid === true, `Offline verification valid=${result.valid}`);
+  if (result.valid) {
+    log("Offline token Ed25519 signature verified successfully");
+  } else {
+    log(`Offline verification code: ${result.code ?? "unknown"}`);
+  }
+} catch (err) {
+  fail(`verifyCachedOffline failed: ${err.message}`);
+}
+
+printTest("Step 4: Deactivate");
+try {
+  await offlineSDK.deactivate();
+  pass("Deactivated");
+} catch (err) {
+  fail(`Deactivate: ${err.message}`);
+}
+offlineSDK.destroy();
+
+// ============================================================
 // SUMMARY
 // ============================================================
 printHeader("RESULTS");
@@ -669,6 +741,7 @@ if (failedTests === 0) {
         - Auto-validation cycles with heartbeat piggyback
         - Concurrent validation and heartbeat stress
         - Full lifecycle (activate -> validate -> heartbeat -> deactivate)
+        - Offline token download & Ed25519 verification
 `);
 } else {
   console.log(`\n   ${failedTests} test(s) failed. Review output above.\n`);
@@ -678,6 +751,6 @@ if (failedTests === 0) {
 sdk.destroy();
 noTelemetrySDK.destroy();
 lifecycleSDK.destroy();
-// autoSDK, concurrentSDK, heartbeatTimerSDK, appVersionSDK already destroyed
+// autoSDK, concurrentSDK, heartbeatTimerSDK, appVersionSDK, offlineSDK already destroyed
 
 process.exit(failedTests > 0 ? 1 : 0);

@@ -6,6 +6,15 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.4.1] - 2026-02-09
+
+### Changed
+
+- `syncOfflineAssets()` and `verifyCachedOffline()` are now public APIs
+- Added offline token download & verification to stress test suite
+
+---
+
 ## [0.4.0] - 2026-02-09
 
 ### Added

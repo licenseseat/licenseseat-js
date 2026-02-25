@@ -675,7 +675,7 @@ describe("LicenseSeatSDK", () => {
     it("should export SDK_VERSION", () => {
       expect(SDK_VERSION).toBeDefined();
       expect(typeof SDK_VERSION).toBe("string");
-      expect(SDK_VERSION).toBe("0.4.0");
+      expect(SDK_VERSION).toBe("0.4.1");
     });
   });
 });
