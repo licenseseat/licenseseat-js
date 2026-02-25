@@ -669,6 +669,30 @@ describe("LicenseSeatSDK", () => {
         noTelSdk.destroy();
       }
     });
+
+    it("should include telemetry in getOfflineToken even without options", async () => {
+      let capturedTelemetry = null;
+      const origFetch = globalThis.fetch;
+      const interceptFetch = vi.fn(async (url, options) => {
+        if (typeof url === "string" && url.includes("/offline_token") && options?.body) {
+          const body = JSON.parse(options.body);
+          capturedTelemetry = body.telemetry;
+        }
+        return origFetch(url, options);
+      });
+      globalThis.fetch = interceptFetch;
+
+      try {
+        await sdk.activate(mockData.validLicenseKey);
+        await sdk.getOfflineToken(); // No options passed
+
+        expect(capturedTelemetry).not.toBeNull();
+        expect(capturedTelemetry.sdk_version).toBeDefined();
+        expect(capturedTelemetry.platform).toBeDefined();
+      } finally {
+        globalThis.fetch = origFetch;
+      }
+    });
   });
 
   describe("SDK Version", () => {
