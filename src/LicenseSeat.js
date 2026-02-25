@@ -37,7 +37,7 @@ import { collectTelemetry } from "./telemetry.js";
  * SDK version constant
  * @type {string}
  */
-export const SDK_VERSION = "0.4.1";
+export const SDK_VERSION = "0.4.2";
 
 /**
  * Default configuration values
@@ -932,11 +932,19 @@ export class LicenseSeatSDK {
       return;
     }
 
+    if (!this.config.productSlug) {
+      this.log("Heartbeat timer disabled (productSlug not configured)");
+      return;
+    }
+
     this.heartbeatTimer = setInterval(() => {
       this.heartbeat()
         .then(() => this.emit("heartbeat:cycle", { nextRunAt: new Date(Date.now() + interval) }))
         .catch((err) => this.log("Heartbeat timer failed:", err));
     }, interval);
+
+    // Emit initial cycle event immediately (like auto-validation does)
+    this.emit("heartbeat:cycle", { nextRunAt: new Date(Date.now() + interval) });
 
     this.log("Heartbeat timer started (interval:", interval, "ms)");
   }
