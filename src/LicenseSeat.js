@@ -37,7 +37,7 @@ import { collectTelemetry } from "./telemetry.js";
  * SDK version constant
  * @type {string}
  */
-export const SDK_VERSION = "0.4.0";
+export const SDK_VERSION = "0.4.1";
 
 /**
  * Default configuration values
@@ -1008,10 +1008,10 @@ export class LicenseSeatSDK {
   // ============================================================
 
   /**
-   * Fetch and cache offline token and signing key
-   * Uses a lock to prevent concurrent calls from causing race conditions
+   * Download and cache the offline token and its corresponding public signing key.
+   * Emits `offlineToken:ready` on success. Safe to call multiple times — concurrent
+   * calls are deduplicated automatically.
    * @returns {Promise<void>}
-   * @private
    */
   async syncOfflineAssets() {
     // Prevent concurrent syncs
@@ -1069,9 +1069,10 @@ export class LicenseSeatSDK {
   }
 
   /**
-   * Verify cached offline token
+   * Verify the cached offline token and return a validation result.
+   * Use this to validate the license when the device is offline.
+   * The offline token must have been previously downloaded via {@link syncOfflineAssets}.
    * @returns {Promise<import('./types.js').ValidationResult>}
-   * @private
    */
   async verifyCachedOffline() {
     const signed = this.cache.getOfflineToken();
