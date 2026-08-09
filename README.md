@@ -10,12 +10,12 @@ The official JavaScript/TypeScript SDK for [LicenseSeat](https://licenseseat.com
 
 ## Features
 
-- **License activation & deactivation** – Activate licenses with automatic device fingerprinting
+- **License activation & deactivation** – Activate licenses with a random installation ID or an explicit stable device ID
 - **Online & offline validation** – Validate licenses with optional offline fallback
 - **Entitlement checking** – Check feature access with `hasEntitlement()` and `checkEntitlement()`
 - **Heartbeat** – Automatic periodic heartbeats to report device activity
-- **Telemetry** – Auto-collected device and environment data sent with each API request
-- **Local caching** – Secure localStorage-based caching with clock tamper detection
+- **Telemetry** – Optional bounded device and environment data attached to POST requests
+- **Local caching** – Bounded convenience state plus signed offline material; cached online responses never grant authority after reload
 - **Auto-retry with exponential backoff** – Resilient network handling
 - **Event-driven architecture** – Subscribe to SDK lifecycle events
 - **TypeScript support** – Full type definitions included (auto-generated from JSDoc)
@@ -118,6 +118,16 @@ const hasPro: boolean = sdk.hasEntitlement('pro');
 
 TypeScript users get full type support automatically – the package includes generated `.d.ts` declaration files.
 
+### Security model
+
+- HTTPS is required. Plain HTTP is accepted only for an explicitly enabled loopback development URL.
+- License keys and device identifiers are sent in JSON request bodies, not URL paths. Bearer credentials are never sent to public health or signing-key endpoints.
+- Browser and renderer-process code cannot keep an API key secret from the end user or from injected scripts. Use only least-privilege client credentials and enforce authorization, product tenancy, seat limits, and license state on the server.
+- `localStorage` is attacker-writable and is not a trust anchor. The SDK revalidates cached online state before granting entitlements. Persistent offline use requires Ed25519 public keys pinned through trusted application configuration.
+- Response bodies, JSON structure, identifiers, timestamps, retries, redirects, and request deadlines are bounded and validated fail-closed.
+
+No client SDK can protect licensing decisions from an attacker who controls the application process. Treat local checks as enforcement for ordinary use and keep high-value authorization on a trusted server.
+
 ---
 
 ## Configuration
@@ -132,6 +142,9 @@ const sdk = new LicenseSeat({
 
   // API Configuration
   apiBaseUrl: 'https://licenseseat.com/api/v1',  // Default
+  requestTimeoutMs: 15000,                       // Per-attempt request/body deadline
+  maxResponseBytes: 1048576,                     // Request/response JSON size ceiling
+  allowInsecureHttp: false,                      // HTTP only for explicit loopback development
 
   // Storage
   storagePrefix: 'licenseseat_',              // localStorage key prefix
@@ -153,6 +166,9 @@ const sdk = new LicenseSeat({
   maxOfflineDays: 0,                          // Max days offline (0 = disabled)
   offlineLicenseRefreshInterval: 259200000,   // 72 hours
   maxClockSkewMs: 300000,                     // 5 minutes
+  signingPublicKeys: {                        // Trusted Ed25519 keys for persistent offline use
+    'key-id-001': 'base64url-encoded-32-byte-public-key'
+  },
 
   // Network
   maxRetries: 3,                              // Retry attempts for failed requests
@@ -170,18 +186,25 @@ const sdk = new LicenseSeat({
 | ------------------------ | --------- | ---------------------------------- | --------------------------------------------------------- |
 | `productSlug`            | `string`  | –                                  | **Required.** Your product slug from the dashboard        |
 | `apiKey`                 | `string`  | `null`                             | API key for authentication (required for most operations) |
-| `apiBaseUrl`             | `string`  | `'https://licenseseat.com/api/v1'` | API base URL                                              |
+| `apiBaseUrl`             | `string`  | `'https://licenseseat.com/api/v1'` | HTTPS API base URL                                        |
+| `requestTimeoutMs`       | `number`  | `15000`                            | Per-attempt deadline covering headers and response body   |
+| `maxResponseBytes`       | `number`  | `1048576`                          | Maximum request or response JSON body size                |
+| `allowInsecureHttp`      | `boolean` | `false`                            | Permit HTTP only for a loopback development URL           |
 | `storagePrefix`          | `string`  | `'licenseseat_'`                   | Prefix for localStorage keys                              |
 | `autoValidateInterval`   | `number`  | `3600000`                          | Auto-validation interval in ms (1 hour)                   |
 | `autoInitialize`         | `boolean` | `true`                             | Auto-initialize and validate cached license               |
 | `heartbeatInterval`      | `number`  | `300000`                           | Heartbeat interval in ms (5 minutes). Set `0` to disable  |
-| `telemetryEnabled`       | `boolean` | `true`                             | Enable telemetry collection. Set `false` for GDPR compliance |
+| `telemetryEnabled`       | `boolean` | `true`                             | Attach bounded platform telemetry to POST requests        |
 | `appVersion`             | `string`  | `null`                             | Your app version string (sent as `app_version` in telemetry) |
 | `appBuild`               | `string`  | `null`                             | Your app build identifier (sent as `app_build` in telemetry) |
 | `offlineFallbackEnabled` | `boolean` | `false`                            | Enable offline validation on network errors               |
 | `maxOfflineDays`         | `number`  | `0`                                | Maximum days license works offline (0 = disabled)         |
+| `offlineLicenseRefreshInterval` | `number` | `259200000`                 | Offline-token refresh interval in ms                      |
+| `maxClockSkewMs`         | `number`  | `300000`                           | Permitted clock skew during offline verification          |
+| `signingPublicKeys`      | `object`  | `{}`                               | Trusted Ed25519 keys by key ID for offline use after reload |
 | `maxRetries`             | `number`  | `3`                                | Max retry attempts for failed API calls                   |
 | `retryDelay`             | `number`  | `1000`                             | Initial retry delay in ms (exponential backoff)           |
+| `networkRecheckInterval` | `number`  | `30000`                            | Connectivity probe interval after transport failure       |
 | `debug`                  | `boolean` | `false`                            | Enable debug logging to console                           |
 
 ---
@@ -324,20 +347,20 @@ console.log(status);
 
 #### `sdk.testAuth()`
 
-Test API connectivity by calling the `/health` endpoint. Returns health status and API version.
+Verify the configured API credential and its baseline `licenses:validate` scope using the protected, side-effect-free `/auth` endpoint.
 
 ```javascript
 try {
   const result = await sdk.testAuth();
-  console.log('Authenticated:', result.authenticated);  // Always true if request succeeds
-  console.log('Healthy:', result.healthy);              // API health status
+  console.log('Authenticated:', result.authenticated);  // true only after protected auth succeeds
+  console.log('Healthy:', result.healthy);              // endpoint was reachable and valid
   console.log('API Version:', result.api_version);      // e.g., '1.0.0'
 } catch (error) {
   console.error('Connection failed:', error);
 }
 ```
 
-> **Note:** This method tests API connectivity, not API key validity. A successful response means the API is reachable. Authentication errors will surface when calling protected endpoints like `activate()` or `validateLicense()`.
+An invalid, expired, cross-tenant, or insufficiently scoped credential causes the method to reject. The public `/health` endpoint is deliberately not treated as proof of authentication.
 
 #### `sdk.heartbeat()`
 
@@ -482,7 +505,10 @@ const sdk = new LicenseSeat({
   apiKey: 'your-key',
   productSlug: 'your-product',
   offlineFallbackEnabled: true,  // Enable offline fallback
-  maxOfflineDays: 7              // Allow 7 days offline
+  maxOfflineDays: 7,             // Allow at most 7 days offline
+  signingPublicKeys: {
+    'key-id-001': 'base64url-encoded-32-byte-public-key'
+  }
 });
 
 // After activation, offline assets are automatically synced
@@ -503,7 +529,11 @@ if (result.offline) {
    - Ed25519 signature
    - Canonical JSON for verification
 3. When offline, the SDK verifies the signature locally
-4. Clock tamper detection prevents users from bypassing expiration
+4. The SDK enforces signed time bounds, local policy, product/license/device binding, and a defense-in-depth clock-rollback check
+
+The public key is part of the trust decision. For offline authority that survives an application reload, embed or inject the expected key through trusted application configuration using `signingPublicKeys`. A public key recovered from `localStorage` is intentionally ignored. Fetching a key over authenticated HTTPS is suitable for the current process, but it does not turn attacker-writable storage into a durable trust anchor.
+
+Clock-rollback detection is defense in depth, not tamper-proof storage. An attacker controlling the process, system clock, or application bundle can bypass local enforcement; keep valuable authorization on trusted infrastructure.
 
 ### Offline Methods
 
@@ -546,7 +576,7 @@ const signingKey = await sdk.getSigningKey('key-id-001');
 console.log(signingKey);
 // {
 //   object: 'signing_key',
-//   kid: 'key-id-001',
+//   key_id: 'key-id-001',
 //   public_key: 'base64-encoded-public-key',
 //   algorithm: 'Ed25519',
 //   created_at: '2024-01-01T00:00:00Z'
@@ -567,7 +597,7 @@ const isValid = await sdk.verifyOfflineToken(token, signingKey.public_key);
 console.log('Signature valid:', isValid);
 ```
 
-> **Important:** The `verifyOfflineToken()` method requires you to pass both the token and the public key. Fetch the signing key using `getSigningKey()` with the `key_id` from the token's signature.
+> **Important:** `verifyOfflineToken()` proves that the token matches the public key you supply; it does not establish that the supplied key is trusted. Pin the expected key in application configuration for persistent offline decisions.
 
 ### Offline Token Structure
 
@@ -580,7 +610,7 @@ console.log('Signature valid:', isValid);
     product_slug: 'your-product',
     plan_key: 'pro',
     mode: 'hardware_locked',
-    device_id: 'web-abc123',
+    fingerprint: 'install-random-id',
     iat: 1704067200,        // Issued at (Unix timestamp)
     exp: 1706659200,        // Expires at (Unix timestamp)
     nbf: 1704067200,        // Not before (Unix timestamp)
@@ -604,7 +634,7 @@ console.log('Signature valid:', isValid);
 
 ## Telemetry
 
-The SDK automatically collects non-PII (non-personally-identifiable) device and environment data and includes it with every POST request sent to the LicenseSeat API. This data helps you understand what platforms and environments your customers use.
+The SDK can collect bounded device and environment data and include it with POST requests sent to the LicenseSeat API. This data helps you understand what platforms and environments your customers use.
 
 Telemetry is **enabled by default** and can be disabled at any time.
 
@@ -624,7 +654,7 @@ Telemetry is **enabled by default** and can be disabled at any time.
 | `language`           | `string` | `"en"`                 | 2-letter language code                           |
 | `architecture`       | `string` | `"arm64"`              | CPU architecture                                 |
 | `cpu_cores`          | `number` | `10`                   | Number of logical CPU cores                      |
-| `memory_gb`          | `number` | `16`                   | Approximate RAM in GB (Chrome/Node.js only)      |
+| `memory_gb`          | `number` | `16`                   | Approximate RAM in GB (supported browsers only)  |
 | `screen_resolution`  | `string` | `"1920x1080"`          | Screen resolution                                |
 | `display_scale`      | `number` | `2`                    | Device pixel ratio                               |
 | `browser_name`       | `string` | `"Chrome"`             | Browser name (browser environments only)         |
@@ -650,7 +680,7 @@ const sdk = new LicenseSeat({
 
 ### Disabling Telemetry
 
-To disable telemetry collection entirely (for example, to comply with GDPR or other privacy regulations):
+To disable SDK telemetry collection entirely:
 
 ```javascript
 const sdk = new LicenseSeat({
@@ -664,9 +694,9 @@ When telemetry is disabled, no device or environment data is attached to API req
 
 ### Privacy
 
-Telemetry collects only non-personally-identifiable information. No IP addresses, user names, email addresses, or other PII are collected by the SDK. The data is used solely to help you understand the platforms and environments where your software is used.
+The SDK does not intentionally collect names, email addresses, or application data in telemetry. Platform, locale, timezone, model, and display attributes can nevertheless be personal data or contribute to device fingerprinting when combined. The server will also ordinarily observe the request IP address independently of this telemetry object. Document the collection, apply appropriate retention/access controls, and assess the privacy rules that apply to your deployment.
 
-Telemetry is opt-out: set `telemetryEnabled: false` to disable it completely.
+Telemetry is enabled by default. Set `telemetryEnabled: false` to disable SDK collection completely.
 
 ---
 

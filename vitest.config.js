@@ -17,6 +17,13 @@ export default defineConfig({
       reporter: ["text", "json", "html"],
       include: ["src/**/*.js"],
       exclude: ["src/types.js", "**/*.test.js", "**/*.spec.js"],
+      thresholds: {
+        perFile: true,
+        statements: 90,
+        branches: 80,
+        functions: 95,
+        lines: 90,
+      },
     },
 
     // Global timeout for tests

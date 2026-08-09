@@ -22,6 +22,8 @@ export class APIError extends Error {
     this.status = status;
     /** @type {import('./types.js').APIErrorData|undefined} */
     this.data = data;
+    /** @type {number|undefined} */
+    this.retryAfterMs = undefined;
   }
 }
 

@@ -2,13 +2,24 @@
  * Utility functions tests
  */
 
-import { describe, it, expect } from "vitest";
+import { afterEach, describe, it, expect, vi } from "vitest";
 import {
   parseActiveEntitlements,
   constantTimeEqual,
   hashCode,
   base64UrlDecode,
+  canonicalJsonStringify,
+  generateDeviceId,
+  getCanvasFingerprint,
+  getCsrfToken,
+  sleep,
 } from "../src/utils.js";
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.useRealTimers();
+  document.head.innerHTML = "";
+});
 
 describe("Utility Functions", () => {
   describe("parseActiveEntitlements", () => {
@@ -131,6 +142,95 @@ describe("Utility Functions", () => {
       const decoded = base64UrlDecode(noPadding);
 
       expect(new TextDecoder().decode(decoded)).toBe("a");
+    });
+
+    it.each([
+      ["", {}, "non-empty"],
+      ["Y Q==", {}, "Invalid Base64"],
+      ["+_==", {}, "Mixed Base64"],
+      ["YQ=", {}, "padding"],
+      ["A", {}, "length"],
+      ["AAAA", { maxBytes: 1 }, "configured limit"],
+      ["AA==", { expectedBytes: 2 }, "exactly 2 bytes"],
+      ["AB==", {}, "Non-canonical"],
+      ["AA==", { maxBytes: 0 }, "positive safe integer"],
+    ])("rejects malformed or policy-violating Base64 %#", (value, options, message) => {
+      expect(() => base64UrlDecode(value, options)).toThrow(message);
+    });
+
+    it("uses the Buffer fallback when browser codecs are unavailable", () => {
+      vi.stubGlobal("atob", undefined);
+      vi.stubGlobal("btoa", undefined);
+      expect(Array.from(base64UrlDecode("aGVsbG8"))).toEqual(
+        Array.from(new TextEncoder().encode("hello"))
+      );
+    });
+
+    it("fails closed when no decoder exists", () => {
+      vi.stubGlobal("atob", undefined);
+      vi.stubGlobal("btoa", undefined);
+      vi.stubGlobal("Buffer", undefined);
+      expect(() => base64UrlDecode("AA==")).toThrow("No base64 decoder");
+    });
+  });
+
+  describe("canonical JSON", () => {
+    it("sorts keys deterministically", () => {
+      expect(canonicalJsonStringify({ z: 1, a: { y: 2, b: 3 } })).toBe(
+        '{"a":{"b":3,"y":2},"z":1}'
+      );
+    });
+  });
+
+  describe("secure installation IDs", () => {
+    it("uses cryptographic UUID randomness and returns distinct browser IDs", () => {
+      const first = generateDeviceId();
+      const second = generateDeviceId();
+      expect(first).toMatch(/^web-[0-9a-f-]{36}$/i);
+      expect(second).not.toBe(first);
+    });
+
+    it("uses getRandomValues when randomUUID is unavailable", () => {
+      vi.stubGlobal("crypto", {
+        getRandomValues(bytes) {
+          bytes.fill(1);
+          return bytes;
+        },
+      });
+      expect(generateDeviceId()).toBe("web-01010101-0101-4101-8101-010101010101");
+    });
+
+    it("refuses weak randomness", () => {
+      vi.stubGlobal("crypto", undefined);
+      expect(() => generateDeviceId()).toThrow("Secure randomness");
+      vi.stubGlobal("crypto", {});
+      expect(() => generateDeviceId()).toThrow("Secure randomness");
+    });
+  });
+
+  describe("browser helpers", () => {
+    it("reads CSRF metadata without exposing a missing value", () => {
+      expect(getCsrfToken()).toBe("");
+      const meta = document.createElement("meta");
+      meta.name = "csrf-token";
+      meta.content = "csrf-value";
+      document.head.append(meta);
+      expect(getCsrfToken()).toBe("csrf-value");
+    });
+
+    it("generates a canvas value and degrades safely when canvas is unavailable", () => {
+      expect(getCanvasFingerprint()).toContain("mockCanvasFingerprint");
+      vi.spyOn(document, "createElement").mockImplementation(() => {
+        throw new Error("blocked");
+      });
+      expect(getCanvasFingerprint()).toBe("no-canvas");
+    });
+
+    it("resolves sleep after the requested timer", async () => {
+      vi.useFakeTimers();
+      const pending = sleep(25);
+      await vi.advanceTimersByTimeAsync(25);
+      await expect(pending).resolves.toBeUndefined();
     });
   });
 });

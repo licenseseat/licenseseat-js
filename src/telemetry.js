@@ -1,11 +1,93 @@
 /**
  * LicenseSeat SDK Telemetry Collection
  *
- * Collects non-PII platform information for analytics.
+ * Collects bounded platform information for product analytics. Depending on
+ * jurisdiction and how it is combined, telemetry can be personal data; callers
+ * can disable collection with `telemetryEnabled: false`.
  * All fields use snake_case keys to match the server API.
  *
  * @module telemetry
  */
+
+const MAX_TELEMETRY_TEXT_BYTES = 255;
+
+/**
+ * Validate a short telemetry string without relying on ambient encoders that a
+ * hostile page can replace. Control characters and malformed UTF-16 are
+ * rejected so telemetry cannot become a log/header injection primitive.
+ *
+ * @param {unknown} value
+ * @param {RegExp} [pattern]
+ * @returns {string|null}
+ * @private
+ */
+function boundedText(value, pattern) {
+  if (typeof value !== "string" || value.length === 0) return null;
+
+  let bytes = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code <= 0x1f || code === 0x7f) return null;
+    if (code <= 0x7f) {
+      bytes += 1;
+    } else if (code <= 0x7ff) {
+      bytes += 2;
+    } else if (code >= 0xd800 && code <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) return null;
+      bytes += 4;
+      index += 1;
+    } else if (code >= 0xdc00 && code <= 0xdfff) {
+      return null;
+    } else {
+      bytes += 3;
+    }
+    if (bytes > MAX_TELEMETRY_TEXT_BYTES) return null;
+  }
+
+  return pattern && !pattern.test(value) ? null : value;
+}
+
+/**
+ * Read and constrain an ambient string without allowing hostile browser
+ * getters to interrupt licensing requests.
+ *
+ * @param {() => unknown} detector
+ * @param {RegExp} [pattern]
+ * @returns {string|null}
+ * @private
+ */
+function safeText(detector, pattern) {
+  try {
+    return boundedText(detector(), pattern);
+  } catch (_) {
+    return null;
+  }
+}
+
+/**
+ * @param {() => unknown} detector
+ * @param {{minimum: number, maximum: number, integer?: boolean}} limits
+ * @returns {number|null}
+ * @private
+ */
+function safeNumber(detector, { minimum, maximum, integer = false }) {
+  try {
+    const value = detector();
+    if (
+      typeof value !== "number" ||
+      !Number.isFinite(value) ||
+      value < minimum ||
+      value > maximum ||
+      (integer && !Number.isInteger(value))
+    ) {
+      return null;
+    }
+    return value;
+  } catch (_) {
+    return null;
+  }
+}
 
 /**
  * Detect the current OS name
@@ -50,13 +132,9 @@ function detectOSName() {
 function detectOSVersion() {
   // Node.js
   if (typeof process !== "undefined" && process.version) {
-    try {
-      const os = await_free_os_release();
-      if (os) return os;
-    } catch (_) {
-      // fall through
-    }
-    return process.version; // e.g. "v20.10.0"
+    // Avoid eval/new Function based CommonJS loading. In ESM/browser bundles,
+    // process.version is the only synchronous, portable value available.
+    return process.version;
   }
 
   // Browser
@@ -83,38 +161,6 @@ function detectOSVersion() {
   }
 
   return null;
-}
-
-/**
- * Synchronous OS release helper (avoids top-level await)
- * @returns {string|null}
- * @private
- */
-function await_free_os_release() {
-  try {
-    // Dynamic require for Node.js (won't execute in browser bundles)
-    // eslint-disable-next-line no-new-func
-    const os = new Function("try { return require('os') } catch(e) { return null }")();
-    if (os && os.release) return os.release();
-  } catch (_) {
-    // not available
-  }
-  return null;
-}
-
-/**
- * Dynamic require helper for Node.js modules (won't execute in browser bundles)
- * @param {string} moduleName - The module to require
- * @returns {Object|null}
- * @private
- */
-function dynamicRequire(moduleName) {
-  try {
-    // eslint-disable-next-line no-new-func
-    return new Function("m", "try { return require(m) } catch(e) { return null }")(moduleName);
-  } catch (_) {
-    return null;
-  }
 }
 
 /**
@@ -275,14 +321,6 @@ function detectCpuCores() {
       return navigator.hardwareConcurrency;
     }
 
-    // Node.js
-    if (typeof process !== "undefined" && process.versions && process.versions.node) {
-      const os = dynamicRequire("os");
-      if (os && os.cpus) {
-        const cpus = os.cpus();
-        if (cpus && cpus.length) return cpus.length;
-      }
-    }
   } catch (_) {
     // not available
   }
@@ -301,33 +339,8 @@ function detectMemoryGb() {
       return navigator.deviceMemory;
     }
 
-    // Node.js
-    if (typeof process !== "undefined" && process.versions && process.versions.node) {
-      const os = dynamicRequire("os");
-      if (os && os.totalmem) {
-        return Math.round(os.totalmem() / (1024 * 1024 * 1024));
-      }
-    }
   } catch (_) {
     // not available
-  }
-  return null;
-}
-
-/**
- * Detect 2-letter language code
- * @returns {string|null} e.g. "en", "pt", "es"
- * @private
- */
-function detectLanguage() {
-  try {
-    const locale = detectLocale();
-    if (locale) {
-      const lang = locale.split(/[-_]/)[0];
-      if (lang && lang.length >= 2) return lang.toLowerCase();
-    }
-  } catch (_) {
-    // fall through
   }
   return null;
 }
@@ -482,29 +495,29 @@ function detectRuntimeVersion() {
  * @returns {Object} Telemetry data object
  */
 export function collectTelemetry(sdkVersion, options) {
-  const locale = detectLocale();
+  const locale = safeText(detectLocale, /^[A-Za-z0-9._@+-]+$/);
 
   const raw = {
-    sdk_version: sdkVersion,
+    sdk_version: safeText(() => sdkVersion),
     sdk_name: 'js',
-    os_name: detectOSName(),
-    os_version: detectOSVersion(),
-    platform: detectPlatform(),
-    device_model: detectDeviceModel(),
-    device_type: detectDeviceType(),
+    os_name: safeText(detectOSName),
+    os_version: safeText(detectOSVersion),
+    platform: safeText(detectPlatform, /^(?:node|electron|react-native|deno|bun|browser|unknown)$/),
+    device_model: safeText(detectDeviceModel),
+    device_type: safeText(detectDeviceType, /^(?:phone|tablet|desktop|server|unknown)$/),
     locale: locale,
-    timezone: detectTimezone(),
-    language: detectLanguage(),
-    architecture: detectArchitecture(),
-    cpu_cores: detectCpuCores(),
-    memory_gb: detectMemoryGb(),
-    screen_resolution: detectScreenResolution(),
-    display_scale: detectDisplayScale(),
-    browser_name: detectBrowserName(),
-    browser_version: detectBrowserVersion(),
-    runtime_version: detectRuntimeVersion(),
-    app_version: (options && options.appVersion) || null,
-    app_build: (options && options.appBuild) || null,
+    timezone: safeText(detectTimezone, /^[A-Za-z0-9_+./:-]+$/),
+    language: safeText(() => locale && locale.split(/[-_]/)[0].toLowerCase(), /^[a-z]{2,8}$/),
+    architecture: safeText(detectArchitecture, /^[A-Za-z0-9._+-]+$/),
+    cpu_cores: safeNumber(detectCpuCores, { minimum: 1, maximum: 65_536, integer: true }),
+    memory_gb: safeNumber(detectMemoryGb, { minimum: 0.1, maximum: 1_048_576 }),
+    screen_resolution: safeText(detectScreenResolution, /^[1-9]\d{0,6}x[1-9]\d{0,6}$/),
+    display_scale: safeNumber(detectDisplayScale, { minimum: 0.1, maximum: 100 }),
+    browser_name: safeText(detectBrowserName),
+    browser_version: safeText(detectBrowserVersion, /^[A-Za-z0-9._+-]+$/),
+    runtime_version: safeText(detectRuntimeVersion, /^[A-Za-z0-9._+-]+$/),
+    app_version: safeText(() => options && options.appVersion),
+    app_build: safeText(() => options && options.appBuild),
   };
 
   // Filter out null/undefined values
