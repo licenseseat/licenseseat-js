@@ -14,6 +14,7 @@ import CJSON from "canonical-json";
 export function parseActiveEntitlements(payload = {}) {
   // New v1 API uses "entitlements" or "active_entitlements"
   const raw = payload.entitlements || payload.active_entitlements || [];
+  if (!Array.isArray(raw)) return [];
   return raw.map((e) => ({
     key: e.key,
     expires_at: e.expires_at ?? null,
@@ -28,6 +29,7 @@ export function parseActiveEntitlements(payload = {}) {
  * @returns {boolean} True if strings are equal
  */
 export function constantTimeEqual(a = "", b = "") {
+  if (typeof a !== "string" || typeof b !== "string") return false;
   if (a.length !== b.length) return false;
   let res = 0;
   for (let i = 0; i < a.length; i++) {
@@ -47,35 +49,49 @@ export function canonicalJsonStringify(obj) {
   /** @type {Function|undefined} */
   const stringify = typeof CJSON === "function" ? CJSON : (CJSON && typeof CJSON === "object" ? /** @type {any} */ (CJSON).stringify : undefined);
   if (!stringify || typeof stringify !== "function") {
-    console.warn(
-      "[LicenseSeat SDK] canonical-json library not loaded correctly. Falling back to basic JSON.stringify. Signature verification might be unreliable if server uses different canonicalization."
-    );
-    try {
-      const sortedObj = {};
-      Object.keys(obj)
-        .sort()
-        .forEach((key) => {
-          sortedObj[key] = obj[key];
-        });
-      return JSON.stringify(sortedObj);
-    } catch (e) {
-      return JSON.stringify(obj);
-    }
+    throw new Error("canonical-json is unavailable; refusing unsafe canonicalization fallback");
   }
-  return stringify(obj);
+  const result = stringify(obj);
+  if (typeof result !== "string") {
+    throw new Error("canonical-json returned an invalid result");
+  }
+  return result;
 }
 
 /**
  * Decode a Base64URL string to a Uint8Array
  * Works in both browser and Node.js environments.
  * @param {string} base64UrlString - The Base64URL encoded string
+ * @param {{expectedBytes?: number, maxBytes?: number}} [options] - Decoding limits
  * @returns {Uint8Array} Decoded bytes
  */
-export function base64UrlDecode(base64UrlString) {
-  let base64 = base64UrlString.replace(/-/g, "+").replace(/_/g, "/");
-  while (base64.length % 4) {
-    base64 += "=";
+export function base64UrlDecode(base64UrlString, options = {}) {
+  if (typeof base64UrlString !== "string" || base64UrlString.length === 0) {
+    throw new Error("Base64 input must be a non-empty string");
   }
+  const { expectedBytes, maxBytes = 1024 * 1024 } = options;
+  if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0) {
+    throw new Error("maxBytes must be a positive safe integer");
+  }
+  if (/\s/.test(base64UrlString) || !/^[A-Za-z0-9+/_-]*={0,2}$/.test(base64UrlString)) {
+    throw new Error("Invalid Base64 encoding");
+  }
+  if ((base64UrlString.includes("+") || base64UrlString.includes("/")) &&
+      (base64UrlString.includes("-") || base64UrlString.includes("_"))) {
+    throw new Error("Mixed Base64 and Base64URL alphabets are not allowed");
+  }
+  const firstPadding = base64UrlString.indexOf("=");
+  if (firstPadding !== -1 && base64UrlString.length % 4 !== 0) {
+    throw new Error("Invalid Base64 padding");
+  }
+  const unpadded = base64UrlString.replace(/=+$/, "");
+  if (unpadded.length % 4 === 1) throw new Error("Invalid Base64 length");
+  if (Math.floor((unpadded.length * 3) / 4) > maxBytes) {
+    throw new Error("Decoded Base64 data exceeds the configured limit");
+  }
+
+  let base64 = unpadded.replace(/-/g, "+").replace(/_/g, "/");
+  while (base64.length % 4) base64 += "=";
 
   // Cross-platform base64 decoding
   /** @type {string} */
@@ -90,9 +106,23 @@ export function base64UrlDecode(base64UrlString) {
     throw new Error("No base64 decoder available (neither atob nor Buffer found)");
   }
 
+  if (raw.length > maxBytes) throw new Error("Decoded Base64 data exceeds the configured limit");
   const outputArray = new Uint8Array(raw.length);
   for (let i = 0; i < raw.length; ++i) {
     outputArray[i] = raw.charCodeAt(i);
+  }
+  if (expectedBytes !== undefined && outputArray.length !== expectedBytes) {
+    throw new Error(`Decoded Base64 data must be exactly ${expectedBytes} bytes`);
+  }
+
+  let canonical;
+  if (typeof btoa === "function") {
+    canonical = btoa(raw).replace(/=+$/, "");
+  } else if (typeof Buffer !== "undefined") {
+    canonical = Buffer.from(outputArray).toString("base64").replace(/=+$/, "");
+  }
+  if (canonical !== undefined && canonical !== base64.replace(/=+$/, "")) {
+    throw new Error("Non-canonical Base64 encoding");
   }
   return outputArray;
 }
@@ -130,33 +160,34 @@ export function getCanvasFingerprint() {
 }
 
 /**
- * Generate a stable device identifier based on browser characteristics.
- * The ID is deterministic - same device will produce the same ID across calls.
- * @returns {string} Stable device identifier
+ * Generate a cryptographically random installation identifier. The SDK stores
+ * this value so it remains stable across calls and reloads. Callers using this
+ * low-level helper directly are responsible for persisting the returned value.
+ * @returns {string} Random device identifier
  */
 export function generateDeviceId() {
-  // Check if we're in a browser environment
-  if (typeof window === "undefined" || typeof navigator === "undefined") {
-    // Node.js or non-browser environment - use a fallback
-    const os = typeof process !== "undefined" ? process.platform : "unknown";
-    const arch = typeof process !== "undefined" ? process.arch : "unknown";
-    return `node-${hashCode(os + "|" + arch)}`;
+  if (typeof globalThis.crypto === "undefined") {
+    throw new Error(
+      "Secure randomness is unavailable; provide an explicit deviceId"
+    );
   }
-
-  const nav = window.navigator;
-  const screen = window.screen;
-  const data = [
-    nav.userAgent,
-    nav.language,
-    screen.colorDepth,
-    screen.width + "x" + screen.height,
-    new Date().getTimezoneOffset(),
-    nav.hardwareConcurrency,
-    getCanvasFingerprint(),
-  ].join("|");
-
-  // Stable ID without timestamp - same device produces same ID
-  return `web-${hashCode(data)}`;
+  const prefix = typeof window === "undefined" ? "node" : "web";
+  if (typeof globalThis.crypto.randomUUID === "function") {
+    return `${prefix}-${globalThis.crypto.randomUUID()}`;
+  }
+  if (typeof globalThis.crypto.getRandomValues !== "function") {
+    throw new Error(
+      "Secure randomness is unavailable; provide an explicit deviceId"
+    );
+  }
+  const bytes = new Uint8Array(16);
+  globalThis.crypto.getRandomValues(bytes);
+  // RFC 4122 version/variant bits make the fallback shape familiar while all
+  // security comes from getRandomValues.
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  return `${prefix}-${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
 /**
@@ -173,6 +204,7 @@ export function sleep(ms) {
  * @returns {string} CSRF token or empty string if not found
  */
 export function getCsrfToken() {
+  if (typeof document === "undefined") return "";
   /** @type {HTMLMetaElement|null} */
   const token = document.querySelector('meta[name="csrf-token"]');
   return token ? token.content : "";

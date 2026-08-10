@@ -4,6 +4,13 @@
  */
 
 import { http, HttpResponse } from "msw";
+import * as ed from "@noble/ed25519";
+import { sha512 } from "@noble/hashes/sha512";
+import { canonicalJsonStringify } from "../../src/utils.js";
+
+ed.etc.sha512Sync = (...messages) => sha512(ed.etc.concatBytes(...messages));
+const TEST_PRIVATE_KEY = Uint8Array.from({ length: 32 }, (_, index) => index + 1);
+const TEST_PUBLIC_KEY = Buffer.from(ed.getPublicKey(TEST_PRIVATE_KEY)).toString("base64");
 
 const API_BASE = "https://licenseseat.com/api/v1";
 
@@ -19,13 +26,14 @@ export const mockData = {
   keyId: "test-key-id-001",
   productSlug: "test-product",
   // Mock Ed25519 public key (base64)
-  publicKey: "MCowBQYDK2VwAyEAQHPaREiwn31mN8k/q9jtV7yMt0vOKNmAOCKvpBCp8YQ=",
+  publicKey: TEST_PUBLIC_KEY,
 };
 
 /**
  * Mock license object (new v1 format)
  */
-const mockLicenseObject = {
+export const mockLicenseObject = {
+  object: "license",
   key: mockData.validLicenseKey,
   status: "active",
   starts_at: new Date().toISOString(),
@@ -48,6 +56,7 @@ const mockLicenseObject = {
   ],
   metadata: {},
   product: {
+    object: "product",
     slug: mockData.productSlug,
     name: "Test Product",
   },
@@ -56,10 +65,10 @@ const mockLicenseObject = {
 /**
  * Mock activation response (new v1 format)
  */
-const mockActivationResponse = {
+export const mockActivationResponse = {
   object: "activation",
   id: 123,
-  device_id: mockData.deviceId,
+  fingerprint: mockData.deviceId,
   device_name: null,
   license_key: mockData.validLicenseKey,
   activated_at: new Date().toISOString(),
@@ -72,7 +81,7 @@ const mockActivationResponse = {
 /**
  * Mock validation response (new v1 format - valid)
  */
-const mockValidValidationResponse = {
+export const mockValidValidationResponse = {
   object: "validation_result",
   valid: true,
   license: mockLicenseObject,
@@ -82,7 +91,7 @@ const mockValidValidationResponse = {
 /**
  * Mock deactivation response (new v1 format)
  */
-const mockDeactivationResponse = {
+export const mockDeactivationResponse = {
   object: "deactivation",
   activation_id: 123,
   deactivated_at: new Date().toISOString(),
@@ -91,19 +100,19 @@ const mockDeactivationResponse = {
 /**
  * Mock offline token response (new v1 format)
  */
-const mockOfflineTokenResponse = {
-  object: "offline_token",
-  token: {
+export function buildMockOfflineToken(licenseKey, fingerprint) {
+  const now = Math.floor(Date.now() / 1000);
+  const token = {
     schema_version: 1,
-    license_key: mockData.validLicenseKey,
+    license_key: licenseKey,
     product_slug: mockData.productSlug,
     plan_key: "pro",
     mode: "hardware_locked",
     seat_limit: 3,
-    device_id: mockData.deviceId,
-    iat: Math.floor(Date.now() / 1000),
-    exp: Math.floor(Date.now() / 1000) + 30 * 24 * 60 * 60, // 30 days
-    nbf: Math.floor(Date.now() / 1000),
+    fingerprint,
+    iat: now,
+    exp: now + 30 * 24 * 60 * 60,
+    nbf: now,
     license_expires_at: null,
     kid: mockData.keyId,
     entitlements: [
@@ -113,19 +122,26 @@ const mockOfflineTokenResponse = {
       },
     ],
     metadata: {},
-  },
-  signature: {
-    algorithm: "Ed25519",
-    key_id: mockData.keyId,
-    value: "mockSignatureBase64Url",
-  },
-  canonical: '{"entitlements":[{"key":"pro"}],"exp":...,"iat":...,"kid":"test-key-id-001",...}',
-};
+  };
+  const canonical = canonicalJsonStringify(token);
+  return {
+    object: "offline_token",
+    token,
+    signature: {
+      algorithm: "Ed25519",
+      key_id: mockData.keyId,
+      value: Buffer.from(ed.sign(new TextEncoder().encode(canonical), TEST_PRIVATE_KEY)).toString(
+        "base64"
+      ),
+    },
+    canonical,
+  };
+}
 
 /**
  * Mock signing key response (new v1 format)
  */
-const mockSigningKeyResponse = {
+export const mockSigningKeyResponse = {
   object: "signing_key",
   key_id: mockData.keyId,
   algorithm: "Ed25519",
@@ -137,7 +153,7 @@ const mockSigningKeyResponse = {
 /**
  * Mock heartbeat response (new v1 format)
  */
-const mockHeartbeatResponse = {
+export const mockHeartbeatResponse = {
   object: "heartbeat",
   received_at: new Date().toISOString(),
   license: mockLicenseObject,
@@ -162,8 +178,8 @@ export const handlers = [
     return HttpResponse.json(mockHealthResponse);
   }),
 
-  // Auth test endpoint (internal use)
-  http.get(`${API_BASE}/auth_test`, ({ request }) => {
+  // Protected, side-effect-free authentication probe.
+  http.get(`${API_BASE}/auth`, ({ request }) => {
     const authHeader = request.headers.get("Authorization");
     if (!authHeader || !authHeader.startsWith("Bearer ")) {
       return HttpResponse.json(
@@ -172,8 +188,11 @@ export const handlers = [
       );
     }
     return HttpResponse.json({
+      object: "authentication",
       authenticated: true,
-      message: "API key is valid",
+      scope: "licenses:validate",
+      api_version: "2026-01-21",
+      timestamp: new Date().toISOString(),
     });
   }),
 
@@ -191,8 +210,8 @@ export const handlers = [
     return HttpResponse.json(mockSigningKeyResponse);
   }),
 
-  // Activation endpoint - POST /products/{slug}/licenses/{key}/activate
-  http.post(`${API_BASE}/products/:slug/licenses/:key/activate`, async ({ request, params }) => {
+  // Activation endpoint - license key is intentionally carried in the body.
+  http.post(`${API_BASE}/products/:slug/licenses/activate`, async ({ request }) => {
     const authHeader = request.headers.get("Authorization");
     if (!authHeader || !authHeader.startsWith("Bearer ")) {
       return HttpResponse.json(
@@ -201,9 +220,8 @@ export const handlers = [
       );
     }
 
-    const { key } = params;
     const body = await request.json();
-    const { device_id } = body;
+    const { license_key: key, fingerprint } = body;
 
     if (key === mockData.invalidLicenseKey) {
       return HttpResponse.json(
@@ -222,7 +240,7 @@ export const handlers = [
     return HttpResponse.json({
       ...mockActivationResponse,
       license_key: key,
-      device_id: device_id || mockData.deviceId,
+      fingerprint: fingerprint || mockData.deviceId,
       license: {
         ...mockLicenseObject,
         key: key,
@@ -230,8 +248,7 @@ export const handlers = [
     }, { status: 201 });
   }),
 
-  // Deactivation endpoint - POST /products/{slug}/licenses/{key}/deactivate
-  http.post(`${API_BASE}/products/:slug/licenses/:key/deactivate`, async ({ request }) => {
+  http.post(`${API_BASE}/products/:slug/licenses/deactivate`, async ({ request }) => {
     const authHeader = request.headers.get("Authorization");
     if (!authHeader || !authHeader.startsWith("Bearer ")) {
       return HttpResponse.json(
@@ -243,8 +260,7 @@ export const handlers = [
     return HttpResponse.json(mockDeactivationResponse);
   }),
 
-  // Validation endpoint - POST /products/{slug}/licenses/{key}/validate
-  http.post(`${API_BASE}/products/:slug/licenses/:key/validate`, async ({ request, params }) => {
+  http.post(`${API_BASE}/products/:slug/licenses/validate`, async ({ request }) => {
     const authHeader = request.headers.get("Authorization");
     if (!authHeader || !authHeader.startsWith("Bearer ")) {
       return HttpResponse.json(
@@ -253,7 +269,8 @@ export const handlers = [
       );
     }
 
-    const { key } = params;
+    const body = await request.json();
+    const { license_key: key } = body;
 
     if (key === mockData.invalidLicenseKey) {
       return HttpResponse.json(
@@ -278,8 +295,7 @@ export const handlers = [
     });
   }),
 
-  // Heartbeat endpoint - POST /products/{slug}/licenses/{key}/heartbeat
-  http.post(`${API_BASE}/products/:slug/licenses/:key/heartbeat`, async ({ request }) => {
+  http.post(`${API_BASE}/products/:slug/licenses/heartbeat`, async ({ request }) => {
     const authHeader = request.headers.get("Authorization");
     if (!authHeader || !authHeader.startsWith("Bearer ")) {
       return HttpResponse.json(
@@ -291,8 +307,7 @@ export const handlers = [
     return HttpResponse.json(mockHeartbeatResponse);
   }),
 
-  // Offline token endpoint - POST /products/{slug}/licenses/{key}/offline_token
-  http.post(`${API_BASE}/products/:slug/licenses/:key/offline_token`, async ({ request, params }) => {
+  http.post(`${API_BASE}/products/:slug/licenses/offline-token`, async ({ request }) => {
     const authHeader = request.headers.get("Authorization");
     if (!authHeader || !authHeader.startsWith("Bearer ")) {
       return HttpResponse.json(
@@ -301,7 +316,8 @@ export const handlers = [
       );
     }
 
-    const { key } = params;
+    const body = await request.json();
+    const { license_key: key } = body;
 
     if (key === mockData.invalidLicenseKey) {
       return HttpResponse.json(
@@ -310,12 +326,6 @@ export const handlers = [
       );
     }
 
-    return HttpResponse.json({
-      ...mockOfflineTokenResponse,
-      token: {
-        ...mockOfflineTokenResponse.token,
-        license_key: key,
-      },
-    });
+    return HttpResponse.json(buildMockOfflineToken(key, body.fingerprint || mockData.deviceId));
   }),
 ];

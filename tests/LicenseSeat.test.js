@@ -5,8 +5,13 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { readFileSync } from "node:fs";
 import { LicenseSeatSDK, SDK_VERSION } from "../src/LicenseSeat.js";
 import { mockData } from "./mocks/handlers.js";
+
+const packageVersion = JSON.parse(
+  readFileSync("package.json", "utf8"),
+).version;
 
 describe("LicenseSeatSDK", () => {
   let sdk;
@@ -233,7 +238,7 @@ describe("LicenseSeatSDK", () => {
     });
 
     it("should throw when no license is active", async () => {
-      sdk.cache.clearLicense();
+      sdk.reset();
 
       await expect(sdk.deactivate()).rejects.toThrow("No active license found");
     });
@@ -255,6 +260,7 @@ describe("LicenseSeatSDK", () => {
         activated_at: new Date().toISOString(),
         last_validated: new Date().toISOString(),
       });
+      sdk.initialize();
 
       const status = sdk.getStatus();
       expect(status.status).toBe("pending");
@@ -387,7 +393,7 @@ describe("LicenseSeatSDK", () => {
     });
 
     it("should return undefined when no license is cached", async () => {
-      sdk.cache.clearLicense();
+      sdk.reset();
 
       const result = await sdk.heartbeat();
       expect(result).toBeUndefined();
@@ -471,17 +477,16 @@ describe("LicenseSeatSDK", () => {
       noHeartbeatSdk.destroy();
     });
 
-    it("should not start heartbeat timer when heartbeatInterval is negative", async () => {
-      const negativeSdk = new LicenseSeatSDK({
-        apiKey: mockData.apiKey,
-        productSlug: mockData.productSlug,
-        heartbeatInterval: -1000,
-        autoInitialize: false,
-      });
-
-      await negativeSdk.activate(mockData.validLicenseKey);
-      expect(negativeSdk.heartbeatTimer).toBeNull();
-      negativeSdk.destroy();
+    it("should reject a negative heartbeat interval", () => {
+      expect(
+        () =>
+          new LicenseSeatSDK({
+            apiKey: mockData.apiKey,
+            productSlug: mockData.productSlug,
+            heartbeatInterval: -1000,
+            autoInitialize: false,
+          })
+      ).toThrow("heartbeatInterval must be an integer");
     });
 
     it("should start heartbeat timer on activation when interval > 0", async () => {
@@ -674,7 +679,7 @@ describe("LicenseSeatSDK", () => {
       let capturedTelemetry = null;
       const origFetch = globalThis.fetch;
       const interceptFetch = vi.fn(async (url, options) => {
-        if (typeof url === "string" && url.includes("/offline_token") && options?.body) {
+        if (typeof url === "string" && url.includes("/offline-token") && options?.body) {
           const body = JSON.parse(options.body);
           capturedTelemetry = body.telemetry;
         }
@@ -682,15 +687,25 @@ describe("LicenseSeatSDK", () => {
       });
       globalThis.fetch = interceptFetch;
 
+      const offlineSdk = new LicenseSeatSDK({
+        apiKey: mockData.apiKey,
+        productSlug: mockData.productSlug,
+        offlineFallbackEnabled: true,
+        maxOfflineDays: 30,
+        autoInitialize: false,
+        heartbeatInterval: 0,
+      });
+
       try {
-        await sdk.activate(mockData.validLicenseKey);
-        await sdk.getOfflineToken(); // No options passed
+        await offlineSdk.activate(mockData.validLicenseKey);
+        await offlineSdk.getOfflineToken(); // No options passed
 
         expect(capturedTelemetry).not.toBeNull();
         expect(capturedTelemetry.sdk_version).toBeDefined();
         expect(capturedTelemetry.platform).toBeDefined();
       } finally {
         globalThis.fetch = origFetch;
+        offlineSdk.destroy();
       }
     });
   });
@@ -700,6 +715,7 @@ describe("LicenseSeatSDK", () => {
       expect(SDK_VERSION).toBeDefined();
       expect(typeof SDK_VERSION).toBe("string");
       expect(SDK_VERSION).toMatch(/^\d+\.\d+\.\d+$/); // semver format
+      expect(SDK_VERSION).toBe(packageVersion);
     });
   });
 });

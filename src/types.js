@@ -21,10 +21,15 @@
  * @property {number} [maxOfflineDays=0] - Maximum days a license can be used offline (0 = disabled)
  * @property {number} [maxClockSkewMs=300000] - Maximum allowed clock skew in ms for offline validation (default: 5 minutes)
  * @property {boolean} [autoInitialize=true] - Automatically initialize and validate cached license on construction
- * @property {boolean} [telemetryEnabled=true] - Enable telemetry collection on POST requests (set false for GDPR compliance)
+ * @property {boolean} [telemetryEnabled=true] - Enable bounded platform telemetry on POST requests; assess applicable privacy obligations
+ * @property {boolean} [browserHighEntropyTelemetryEnabled=false] - Explicitly request platformVersion, architecture, and model through Chromium UA Client Hints without delaying licensing requests
  * @property {number} [heartbeatInterval=300000] - Interval in ms between automatic heartbeats (default: 5 minutes, set 0 to disable)
  * @property {string} [appVersion] - User-provided app version string, sent as app_version in telemetry
  * @property {string} [appBuild] - User-provided app build identifier, sent as app_build in telemetry
+ * @property {number} [requestTimeoutMs=15000] - Per-attempt network timeout in milliseconds
+ * @property {number} [maxResponseBytes=1048576] - Maximum accepted API response body size
+ * @property {boolean} [allowInsecureHttp=false] - Explicitly permit HTTP only for a loopback API URL during local development
+ * @property {Object<string, string>} [signingPublicKeys] - Pinned Ed25519 public keys keyed by key ID for offline verification across reloads
  */
 
 /**
@@ -166,7 +171,7 @@
  * @property {string} plan_key - License plan key
  * @property {string} mode - License mode ("hardware_locked", "floating", "named_user")
  * @property {number|null} [seat_limit] - Seat limit (null for unlimited)
- * @property {string|null} [device_id] - Device ID (required for hardware_locked mode)
+ * @property {string} fingerprint - Device fingerprint bound to the offline token
  * @property {number} iat - Issued at (Unix timestamp in seconds)
  * @property {number} exp - Expires at (Unix timestamp in seconds)
  * @property {number} nbf - Not before (Unix timestamp in seconds)
@@ -217,6 +222,16 @@
  * @property {string} status - Health status ("healthy")
  * @property {string} api_version - API version string
  * @property {string} timestamp - ISO8601 timestamp
+ */
+
+/**
+ * Protected authentication-check response
+ * @typedef {Object} AuthenticationResponse
+ * @property {string} object - Object type ("authentication")
+ * @property {boolean} authenticated - Always true for a successful authenticated response
+ * @property {string} scope - Verified baseline scope ("licenses:validate")
+ * @property {string} api_version - API version string
+ * @property {string} timestamp - RFC 3339 server timestamp
  */
 
 /**

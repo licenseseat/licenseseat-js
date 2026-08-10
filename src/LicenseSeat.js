@@ -6,7 +6,7 @@
  *
  * Features:
  * - License activation and deactivation
- * - Local caching with encryption support
+ * - Bounded local caching for identity and signed offline material
  * - Online and offline validation
  * - Automatic re-validation
  * - Entitlement checking
@@ -23,21 +23,42 @@ import { sha512 } from "@noble/hashes/sha512";
 import { LicenseCache } from "./cache.js";
 import { APIError, ConfigurationError, LicenseError, CryptoError } from "./errors.js";
 import {
-  parseActiveEntitlements,
   constantTimeEqual,
-  canonicalJsonStringify,
   base64UrlDecode,
   generateDeviceId,
   sleep,
   getCsrfToken,
 } from "./utils.js";
-import { collectTelemetry } from "./telemetry.js";
+import {
+  collectBrowserHighEntropyTelemetry,
+  collectTelemetry,
+} from "./telemetry.js";
+import {
+  cloneBoundedJson,
+  isRecord,
+  normalizeConfig,
+  parseApiJson,
+  readBoundedResponseText,
+  redactForLog,
+  requireFingerprint,
+  requireKeyId,
+  requireLicenseKey,
+  requireProductSlug,
+  requireSafeText,
+  validateActivationResponse,
+  validateDeactivationResponse,
+  validateHeartbeatResponse,
+  validateOfflineClaims,
+  validateOfflineEnvelope,
+  validateSigningKeyResponse,
+  validateValidationResponse,
+} from "./security.js";
 
 /**
  * SDK version constant
  * @type {string}
  */
-export const SDK_VERSION = "0.4.3";
+export const SDK_VERSION = "0.5.0";
 
 /**
  * Default configuration values
@@ -60,9 +81,68 @@ const DEFAULT_CONFIG = {
   maxClockSkewMs: 5 * 60 * 1000, // 5 minutes
   autoInitialize: true,
   telemetryEnabled: true, // Set false to disable telemetry (e.g. for GDPR compliance)
+  browserHighEntropyTelemetryEnabled: false, // Explicit opt-in for UA Client Hints
   appVersion: null, // User-provided app version, sent as app_version in telemetry
   appBuild: null, // User-provided app build, sent as app_build in telemetry
+  requestTimeoutMs: 15000,
+  maxResponseBytes: 1024 * 1024,
+  allowInsecureHttp: false,
+  signingPublicKeys: Object.freeze({}),
 };
+
+function fingerprintPayload(fingerprint) {
+  return {
+    fingerprint,
+    device_id: fingerprint,
+    device_fingerprint: fingerprint,
+  };
+}
+
+function equalPublicKeys(left, right) {
+  try {
+    const a = base64UrlDecode(left, { expectedBytes: 32, maxBytes: 32 });
+    const b = base64UrlDecode(right, { expectedBytes: 32, maxBytes: 32 });
+    let difference = 0;
+    for (let index = 0; index < a.length; index += 1) {
+      difference |= a[index] ^ b[index];
+    }
+    return difference === 0;
+  } catch (_) {
+    return false;
+  }
+}
+
+function apiErrorCode(data) {
+  if (!isRecord(data)) return null;
+  const nested = isRecord(data.error) ? data.error.code : undefined;
+  const candidate = nested ?? data.code ?? data.reason_code;
+  return typeof candidate === "string" && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/.test(candidate)
+    ? candidate
+    : null;
+}
+
+function safeErrorMessage(value, fallback = "Request failed") {
+  if (typeof value !== "string" || value.length === 0) return fallback;
+  return new TextDecoder().decode(new TextEncoder().encode(value))
+    .replace(/[\u0000-\u001f\u007f]/g, " ")
+    .slice(0, 2048);
+}
+
+function normalizeOperationOptions(value, allowed, name) {
+  let cloned;
+  try {
+    cloned = cloneBoundedJson(value);
+  } catch (error) {
+    throw new TypeError(
+      error instanceof Error ? `${name} are invalid: ${error.message}` : `${name} are invalid`
+    );
+  }
+  if (!isRecord(cloned)) throw new TypeError(`${name} must be an object`);
+  const allowedSet = new Set(allowed);
+  const unknown = Object.keys(cloned).find((key) => !allowedSet.has(key));
+  if (unknown) throw new TypeError(`Unknown ${name.toLowerCase()} field: ${unknown}`);
+  return cloned;
+}
 
 /**
  * LicenseSeat SDK Main Class
@@ -102,17 +182,18 @@ export class LicenseSeatSDK {
      * SDK configuration
      * @type {import('./types.js').LicenseSeatConfig}
      */
-    this.config = {
-      ...DEFAULT_CONFIG,
-      ...config,
-    };
+    try {
+      this.config = normalizeConfig(DEFAULT_CONFIG, config);
+    } catch (error) {
+      throw new ConfigurationError(error instanceof Error ? error.message : "Invalid SDK configuration");
+    }
 
     /**
      * Event listeners map
      * @type {Object<string, import('./types.js').EventCallback[]>}
      * @private
      */
-    this.eventListeners = {};
+    this.eventListeners = Object.create(null);
 
     /**
      * Auto-validation timer ID
@@ -184,6 +265,48 @@ export class LicenseSeatSDK {
      */
     this.destroyed = false;
 
+    /** @type {boolean} */
+    this.initialized = false;
+
+    /** @type {number} */
+    this.stateGeneration = 0;
+
+    /** @type {import('./types.js').CachedLicense|null} */
+    this.currentLicense = null;
+
+    /** @type {import('./types.js').ValidationResult|null} */
+    this.trustedValidation = null;
+
+    /** @type {Map<string, string>} */
+    this.trustedPublicKeys = new Map(Object.entries(this.config.signingPublicKeys));
+
+    /** @type {Map<string, number>} */
+    this.transientSecrets = new Map();
+
+    /** @type {number} */
+    this.lastTrustedTimeMs = Date.now();
+
+    /** @type {boolean} */
+    this.autoValidationInFlight = false;
+
+    /** @type {boolean} */
+    this.heartbeatInFlight = false;
+
+    /** @type {boolean} */
+    this.activationInFlight = false;
+
+    /** @type {boolean} */
+    this.deactivationInFlight = false;
+
+    /** @type {number} */
+    this.validationSequence = 0;
+
+    /** @type {Readonly<Record<string, string>>} */
+    this.browserHighEntropyValues = Object.freeze({});
+
+    /** @type {Promise<void>|null} */
+    this.browserHighEntropyTelemetryPromise = null;
+
     // Enable synchronous SHA512 for noble-ed25519
     if (ed && ed.etc && sha512) {
       ed.etc.sha512Sync = (...m) => sha512(ed.etc.concatBytes(...m));
@@ -206,19 +329,31 @@ export class LicenseSeatSDK {
    * @returns {void}
    */
   initialize() {
-    this.log("LicenseSeat SDK initialized", this.config);
+    this.assertUsable();
+    if (this.initialized) return;
+    this.initialized = true;
+    this.log("LicenseSeat SDK initialized", {
+      apiBaseUrl: this.config.apiBaseUrl,
+      productSlug: this.config.productSlug,
+      offlineFallbackEnabled: this.config.offlineFallbackEnabled,
+    });
+    this.beginBrowserHighEntropyTelemetryCollection();
 
-    const cachedLicense = this.cache.getLicense();
+    const cachedLicense = this.loadCachedIdentity();
     if (cachedLicense) {
+      this.currentLicense = cachedLicense;
       this.emit("license:loaded", cachedLicense);
 
       // Quick offline verification for instant UX
-      if (this.config.offlineFallbackEnabled) {
+      if (this.config.offlineFallbackEnabled && !this.config.apiKey) {
         this.quickVerifyCachedOfflineLocal()
           .then((offlineResult) => {
             if (offlineResult) {
+              if (this.destroyed || this.currentLicense !== cachedLicense) return;
               this.cache.updateValidation(offlineResult);
+              this.trustedValidation = offlineResult.valid ? offlineResult : null;
               if (offlineResult.valid) {
+                this.recordTrustedTime(Date.now());
                 this.emit("validation:offline-success", offlineResult);
               } else {
                 this.emit("validation:offline-failed", offlineResult);
@@ -231,16 +366,13 @@ export class LicenseSeatSDK {
 
       // Start auto-validation and heartbeat if API key is configured
       if (this.config.apiKey) {
-        this.startAutoValidation(cachedLicense.license_key);
-        this.startHeartbeat();
-
         // Validate in background
         this.validateLicense(cachedLicense.license_key).catch((err) => {
           this.log("Background validation failed:", err);
 
           if (
             err instanceof APIError &&
-            (err.status === 401 || err.status === 501)
+            (err.status === 401 || err.status === 403)
           ) {
             this.log(
               "Authentication issue during validation, using cached license data"
@@ -257,6 +389,29 @@ export class LicenseSeatSDK {
   }
 
   /**
+   * Start optional UA Client Hint collection without delaying licensing work.
+   * Values are never persisted and a rejected/denied browser request is an
+   * ordinary empty result.
+   * @returns {void}
+   * @private
+   */
+  beginBrowserHighEntropyTelemetryCollection() {
+    if (
+      this.browserHighEntropyTelemetryPromise ||
+      this.config.telemetryEnabled === false ||
+      this.config.browserHighEntropyTelemetryEnabled !== true
+    ) {
+      return;
+    }
+
+    this.browserHighEntropyTelemetryPromise = collectBrowserHighEntropyTelemetry()
+      .then((values) => {
+        if (!this.destroyed) this.browserHighEntropyValues = values;
+      })
+      .catch(() => {});
+  }
+
+  /**
    * Activate a license
    * @param {string} licenseKey - The license key to activate
    * @param {import('./types.js').ActivationOptions} [options={}] - Activation options
@@ -265,53 +420,99 @@ export class LicenseSeatSDK {
    * @throws {APIError} When the API request fails
    */
   async activate(licenseKey, options = {}) {
+    this.assertUsable();
     if (!this.config.productSlug) {
       throw new ConfigurationError("productSlug is required for activation");
     }
+    this.requireApiKey();
+    requireLicenseKey(licenseKey);
+    options = normalizeOperationOptions(
+      options,
+      ["deviceId", "deviceName", "metadata"],
+      "Activation options"
+    );
 
-    const deviceId = options.deviceId || generateDeviceId();
+    const deviceId = options.deviceId ?? this.getOrCreateDeviceId();
+    requireFingerprint(deviceId);
+    const metadata = options.metadata ?? {};
+    if (!isRecord(metadata)) throw new TypeError("Activation metadata must be an object");
+    /** @type {any} */
     const payload = {
-      device_id: deviceId,
-      metadata: options.metadata || {},
+      license_key: licenseKey,
+      ...fingerprintPayload(deviceId),
+      metadata,
     };
 
-    if (options.deviceName) {
-      payload.device_name = options.deviceName;
+    if (options.deviceName !== undefined) {
+      payload.device_name = requireSafeText(options.deviceName, "deviceName", {
+        min: 1,
+        max: 255,
+      });
     }
+
+    if (this.activationInFlight) {
+      throw new LicenseError("An activation request is already in progress", "operation_in_progress");
+    }
+    this.activationInFlight = true;
+    const generation = this.stateGeneration;
+    const releaseSecrets = this.trackSensitiveValues(licenseKey, deviceId);
 
     try {
       this.emit("activation:start", { licenseKey, deviceId });
 
-      // New v1 API: POST /products/{slug}/licenses/{key}/activate
+      // Keep credentials out of URLs. The server retains legacy URL-key routes,
+      // but current SDKs use the body-key route exclusively.
       const response = await this.apiCall(
-        `/products/${this.config.productSlug}/licenses/${encodeURIComponent(licenseKey)}/activate`,
+        this.licenseActionPath("activate"),
         {
           method: "POST",
           body: payload,
+          retryable: false,
         }
       );
+      const activation = validateActivationResponse(response, {
+        licenseKey,
+        fingerprint: deviceId,
+        productSlug: this.config.productSlug,
+      });
+      if (this.destroyed || generation !== this.stateGeneration) {
+        throw new LicenseError("Activation was superseded by a newer state change", "operation_superseded");
+      }
+      this.stateGeneration += 1;
 
       /** @type {import('./types.js').CachedLicense} */
       const licenseData = {
         license_key: licenseKey,
         device_id: deviceId,
-        activation: response,
-        activated_at: new Date().toISOString(),
+        activation,
+        activated_at: activation.activated_at,
         last_validated: new Date().toISOString(),
       };
 
+      this.currentLicense = licenseData;
+      this.trustedValidation = {
+        valid: true,
+        license: activation.license,
+        active_entitlements: activation.license.active_entitlements,
+      };
       this.cache.setLicense(licenseData);
-      this.cache.updateValidation({ valid: true, optimistic: true });
+      this.cache.updateValidation(this.trustedValidation);
+      this.recordTrustedTime(Date.now());
       this.startAutoValidation(licenseKey);
       this.startHeartbeat();
-      this.syncOfflineAssets();
-      this.scheduleOfflineRefresh();
+      if (this.config.offlineFallbackEnabled && this.config.maxOfflineDays > 0) {
+        void this.syncOfflineAssets();
+        this.scheduleOfflineRefresh();
+      }
 
       this.emit("activation:success", licenseData);
       return licenseData;
     } catch (error) {
       this.emit("activation:error", { licenseKey, error });
       throw error;
+    } finally {
+      releaseSecrets();
+      this.activationInFlight = false;
     }
   }
 
@@ -323,39 +524,63 @@ export class LicenseSeatSDK {
    * @throws {APIError} When the API request fails
    */
   async deactivate() {
+    this.assertUsable();
     if (!this.config.productSlug) {
       throw new ConfigurationError("productSlug is required for deactivation");
     }
+    this.requireApiKey();
 
-    const cachedLicense = this.cache.getLicense();
+    const cachedLicense = this.currentLicense || this.loadCachedIdentity();
     if (!cachedLicense) {
       throw new LicenseError("No active license found", "no_license");
     }
+    if (this.deactivationInFlight) {
+      throw new LicenseError("A deactivation request is already in progress", "operation_in_progress");
+    }
+    this.deactivationInFlight = true;
+    const generation = this.stateGeneration;
 
     try {
       this.emit("deactivation:start", cachedLicense);
 
-      // New v1 API: POST /products/{slug}/licenses/{key}/deactivate
-      const response = await this.apiCall(
-        `/products/${this.config.productSlug}/licenses/${encodeURIComponent(cachedLicense.license_key)}/deactivate`,
+      const rawResponse = await this.apiCall(
+        this.licenseActionPath("deactivate"),
         {
           method: "POST",
           body: {
-            device_id: cachedLicense.device_id,
+            license_key: cachedLicense.license_key,
+            ...fingerprintPayload(cachedLicense.device_id),
           },
+          retryable: false,
         }
       );
+      const response = validateDeactivationResponse(
+        rawResponse,
+        cachedLicense.activation?.id
+      );
+      if (this.destroyed || generation !== this.stateGeneration) {
+        throw new LicenseError("Deactivation was superseded by a newer state change", "operation_superseded");
+      }
 
-      this.cache.clearLicense();
-      this.cache.clearOfflineToken();
-      this.stopAutoValidation();
-      this.stopHeartbeat();
+      this.clearLicenseState();
 
       this.emit("deactivation:success", response);
       return response;
     } catch (error) {
+      if (this.isAlreadyGoneError(error) && generation === this.stateGeneration) {
+        this.clearLicenseState();
+        const response = {
+          object: "deactivation",
+          activation_id: cachedLicense.activation?.id ?? "unknown",
+          deactivated_at: new Date().toISOString(),
+        };
+        this.emit("deactivation:success", response);
+        return response;
+      }
       this.emit("deactivation:error", { error, license: cachedLicense });
       throw error;
+    } finally {
+      this.deactivationInFlight = false;
     }
   }
 
@@ -368,77 +593,109 @@ export class LicenseSeatSDK {
    * @throws {APIError} When the API request fails and offline fallback is not available
    */
   async validateLicense(licenseKey, options = {}) {
+    this.assertUsable();
     if (!this.config.productSlug) {
       throw new ConfigurationError("productSlug is required for validation");
     }
+    this.requireApiKey();
+    requireLicenseKey(licenseKey);
+    options = normalizeOperationOptions(options, ["deviceId"], "Validation options");
+    const current = this.currentLicense || this.loadCachedIdentity();
+    if (!this.currentLicense && current) this.currentLicense = current;
+    const validatesCurrent = Boolean(
+      current && constantTimeEqual(current.license_key, licenseKey)
+    );
+    const fingerprint = options.deviceId ??
+      (validatesCurrent ? current.device_id : this.getOrCreateDeviceId());
+    requireFingerprint(fingerprint);
+    if (
+      validatesCurrent &&
+      !constantTimeEqual(fingerprint, current.device_id)
+    ) {
+      throw new LicenseError(
+        "Validation device ID does not match the active license",
+        "device_mismatch"
+      );
+    }
+    const generation = this.stateGeneration;
+    const validationSequence = ++this.validationSequence;
+    const releaseSecrets = this.trackSensitiveValues(licenseKey, fingerprint);
 
     try {
       this.emit("validation:start", { licenseKey });
 
-      // New v1 API: POST /products/{slug}/licenses/{key}/validate
       const rawResponse = await this.apiCall(
-        `/products/${this.config.productSlug}/licenses/${encodeURIComponent(licenseKey)}/validate`,
+        this.licenseActionPath("validate"),
         {
           method: "POST",
           body: {
-            device_id: options.deviceId || this.cache.getDeviceId(),
+            license_key: licenseKey,
+            ...fingerprintPayload(fingerprint),
           },
+          retryable: true,
         }
       );
 
-      // Normalize response: API returns { object: "validation_result", valid, license: {...}, activation: {...} }
-      // SDK internal structure uses active_entitlements at the top level
-      const response = {
-        valid: rawResponse.valid,
-        code: rawResponse.code,
-        message: rawResponse.message,
-        warnings: rawResponse.warnings,
-        license: rawResponse.license,
-        activation: rawResponse.activation,
-        // Extract entitlements from license for easy access
-        active_entitlements: rawResponse.license?.active_entitlements || [],
-      };
-
-      // Preserve cached entitlements if server response omits them
-      const cachedLicense = this.cache.getLicense();
-      if (
-        (!response.active_entitlements ||
-          response.active_entitlements.length === 0) &&
-        cachedLicense?.validation?.active_entitlements?.length
-      ) {
-        response.active_entitlements =
-          cachedLicense.validation.active_entitlements;
+      const response = validateValidationResponse(rawResponse, {
+        licenseKey,
+        fingerprint,
+        productSlug: this.config.productSlug,
+      });
+      const stateIsCurrent =
+        validatesCurrent &&
+        !this.destroyed &&
+        generation === this.stateGeneration &&
+        validationSequence === this.validationSequence &&
+        this.currentLicense &&
+        constantTimeEqual(this.currentLicense.license_key, licenseKey);
+      if (validatesCurrent && !stateIsCurrent) {
+        throw new LicenseError(
+          "Validation was superseded by a newer authorization state",
+          "operation_superseded"
+        );
       }
 
-      if (cachedLicense && cachedLicense.license_key === licenseKey) {
+      if (stateIsCurrent) {
         this.cache.updateValidation(response);
+        this.trustedValidation = response;
       }
 
       if (response.valid) {
         this.emit("validation:success", response);
-        this.cache.setLastSeenTimestamp(Date.now());
+        if (stateIsCurrent) {
+          this.recordTrustedTime(Date.now());
+          if (!this.validationTimer) this.startAutoValidation(licenseKey);
+          this.startHeartbeat();
+        }
       } else {
         this.emit("validation:failed", response);
-        this.stopAutoValidation();
-        this.currentAutoLicenseKey = null;
+        if (stateIsCurrent) this.revokeTrustedAuthorization(false);
       }
 
-      this.cache.setLastSeenTimestamp(Date.now());
       return response;
     } catch (error) {
       this.emit("validation:error", { licenseKey, error });
 
-      // Check for offline fallback
-      const isNetworkFailure =
-        (error instanceof TypeError && error.message.includes("fetch")) ||
-        (error instanceof APIError && [0, 408].includes(error.status));
+      const isNetworkFailure = error instanceof APIError && [0, 408].includes(error.status);
 
-      if (this.config.offlineFallbackEnabled && isNetworkFailure) {
+      if (this.config.offlineFallbackEnabled && isNetworkFailure && validatesCurrent) {
         const offlineResult = await this.verifyCachedOffline();
 
-        const cachedLicense = this.cache.getLicense();
-        if (cachedLicense && cachedLicense.license_key === licenseKey) {
+        const stateIsCurrent =
+          !this.destroyed &&
+          generation === this.stateGeneration &&
+          validationSequence === this.validationSequence &&
+          this.currentLicense &&
+          constantTimeEqual(this.currentLicense.license_key, licenseKey);
+        if (stateIsCurrent) {
           this.cache.updateValidation(offlineResult);
+          this.trustedValidation = offlineResult.valid ? offlineResult : null;
+          if (offlineResult.valid) this.recordTrustedTime(Date.now());
+        } else {
+          throw new LicenseError(
+            "Offline validation was superseded by a newer authorization state",
+            "operation_superseded"
+          );
         }
 
         if (offlineResult.valid) {
@@ -446,31 +703,41 @@ export class LicenseSeatSDK {
           return offlineResult;
         } else {
           this.emit("validation:offline-failed", offlineResult);
-          this.stopAutoValidation();
-          this.currentAutoLicenseKey = null;
+          if (stateIsCurrent) this.revokeTrustedAuthorization(false);
         }
       }
 
-      // Persist invalid status from error response
-      if (error instanceof APIError && error.data) {
-        const cachedLicense = this.cache.getLicense();
-        if (cachedLicense && cachedLicense.license_key === licenseKey) {
-          // Extract code from new error format: { error: { code, message } }
-          const errorCode = error.data.error?.code || error.data.code;
-          const errorMessage = error.data.error?.message || error.data.message;
+      if (
+        validatesCurrent &&
+        generation === this.stateGeneration &&
+        validationSequence === this.validationSequence &&
+        this.currentLicense &&
+        constantTimeEqual(this.currentLicense.license_key, licenseKey)
+      ) {
+        if (error instanceof APIError && error.data) {
+          const errorCode = apiErrorCode(error.data) || "api_error";
+          const nestedMessage = isRecord(error.data.error)
+            ? error.data.error.message
+            : undefined;
+          const errorMessage = safeErrorMessage(
+            nestedMessage ?? error.data.message,
+            "Validation failed"
+          );
           this.cache.updateValidation({
             valid: false,
             code: errorCode,
             message: errorMessage,
           });
         }
-        if (![0, 408, 429].includes(error.status)) {
-          this.stopAutoValidation();
-          this.currentAutoLicenseKey = null;
+        this.revokeTrustedAuthorization(this.isRevocationError(error));
+        if (this.isRevocationError(error)) {
+          this.cache.clearOfflineToken();
         }
       }
 
       throw error;
+    } finally {
+      releaseSecrets();
     }
   }
 
@@ -480,12 +747,15 @@ export class LicenseSeatSDK {
    * @returns {import('./types.js').EntitlementCheckResult} Entitlement status with details
    */
   checkEntitlement(entitlementKey) {
-    const license = this.cache.getLicense();
-    if (!license || !license.validation) {
+    this.assertUsable();
+    requireSafeText(entitlementKey, "entitlement key", { min: 1, max: 100 });
+    const license = this.currentLicense;
+    const validation = this.trustedValidation;
+    if (!license || !validation || !validation.valid) {
       return { active: false, reason: "no_license" };
     }
 
-    const entitlements = license.validation.active_entitlements || [];
+    const entitlements = validation.active_entitlements || [];
     const entitlement = entitlements.find((e) => e.key === entitlementKey);
 
     if (!entitlement) {
@@ -496,7 +766,7 @@ export class LicenseSeatSDK {
       const expiresAt = new Date(entitlement.expires_at);
       const now = new Date();
 
-      if (expiresAt < now) {
+      if (!Number.isFinite(expiresAt.getTime()) || expiresAt <= now) {
         return {
           active: false,
           reason: "expired",
@@ -530,48 +800,87 @@ export class LicenseSeatSDK {
    * @throws {APIError} When the API request fails
    */
   async getOfflineToken(options = {}) {
+    this.assertUsable();
     if (!this.config.productSlug) {
       throw new ConfigurationError("productSlug is required for offline token");
     }
+    this.requireApiKey();
+    if (!this.config.offlineFallbackEnabled || this.config.maxOfflineDays <= 0) {
+      throw new ConfigurationError(
+        "Offline validation requires offlineFallbackEnabled and maxOfflineDays greater than zero"
+      );
+    }
 
-    const license = this.cache.getLicense();
-    if (!license || !license.license_key) {
+    const license = this.currentLicense;
+    if (!license || !license.license_key || !this.trustedValidation?.valid) {
       const errorMsg =
-        "No active license key found in cache to fetch offline token.";
+        "A currently validated license is required to fetch an offline token.";
       this.emit("sdk:error", { message: errorMsg });
       throw new LicenseError(errorMsg, "no_license");
     }
+    options = normalizeOperationOptions(options, ["deviceId", "ttlDays"], "Offline token options");
+    const generation = this.stateGeneration;
 
     try {
       this.emit("offlineToken:fetching", { licenseKey: license.license_key });
 
-      // Build request body
-      const body = {};
-      if (options.deviceId) {
-        body.device_id = options.deviceId;
+      const fingerprint = options.deviceId ?? license.device_id;
+      requireFingerprint(fingerprint);
+      if (!constantTimeEqual(fingerprint, license.device_id)) {
+        throw new LicenseError(
+          "Offline token device ID does not match the active license",
+          "device_mismatch"
+        );
       }
-      if (options.ttlDays) {
+      /** @type {any} */
+      const body = {
+        license_key: license.license_key,
+        ...fingerprintPayload(fingerprint),
+      };
+      if (options.ttlDays !== undefined) {
+        if (!Number.isSafeInteger(options.ttlDays) || options.ttlDays <= 0 || options.ttlDays > 36_600) {
+          throw new TypeError("ttlDays must be a positive integer no greater than 36600");
+        }
         body.ttl_days = options.ttlDays;
       }
 
-      // New v1 API: POST /products/{slug}/licenses/{key}/offline_token
-      const path = `/products/${this.config.productSlug}/licenses/${encodeURIComponent(license.license_key)}/offline_token`;
-
-      const response = await this.apiCall(path, {
+      const rawResponse = await this.apiCall(this.licenseActionPath("offline-token"), {
         method: "POST",
-        body: body, // Always send body so telemetry gets included
+        body,
+        retryable: true,
       });
+      const response = validateOfflineEnvelope(rawResponse);
+      const publicKey = await this.resolveTrustedSigningKey(response.signature.key_id, true);
+      const verified = await this.verifyOfflineToken(response, publicKey);
+      if (!verified) throw new CryptoError("Offline token signature is invalid");
+      validateOfflineClaims(response, {
+        licenseKey: license.license_key,
+        productSlug: this.config.productSlug,
+        fingerprint,
+        nowMs: Date.now(),
+        maxClockSkewMs: this.config.maxClockSkewMs,
+        maxOfflineDays: this.config.maxOfflineDays,
+      });
+      if (
+        this.destroyed ||
+        generation !== this.stateGeneration ||
+        !this.trustedValidation?.valid ||
+        !this.currentLicense ||
+        !constantTimeEqual(this.currentLicense.license_key, license.license_key)
+      ) {
+        throw new LicenseError(
+          "Offline token request was superseded by a newer authorization state",
+          "operation_superseded"
+        );
+      }
 
       this.emit("offlineToken:fetched", {
         licenseKey: license.license_key,
-        data: response,
+        keyId: response.signature.key_id,
       });
       return response;
     } catch (error) {
-      this.log(
-        `Failed to get offline token for ${license.license_key}:`,
-        error
-      );
+      this.log("Failed to get offline token:", error);
       this.emit("offlineToken:fetchError", {
         licenseKey: license.license_key,
         error: error,
@@ -587,25 +896,29 @@ export class LicenseSeatSDK {
    * @throws {Error} When keyId is not provided or the key is not found
    */
   async getSigningKey(keyId) {
-    if (!keyId) {
-      throw new Error("Key ID is required to fetch a signing key.");
-    }
+    this.assertUsable();
+    requireKeyId(keyId);
     try {
-      this.log(`Fetching signing key for kid: ${keyId}`);
-      // New v1 API: GET /signing_keys/{key_id}
+      this.log("Fetching signing key");
       const response = await this.apiCall(`/signing_keys/${encodeURIComponent(keyId)}`, {
         method: "GET",
+        retryable: true,
+        authenticated: false,
       });
-      if (response && response.public_key) {
-        this.log(`Successfully fetched signing key for kid: ${keyId}`);
-        return response;
-      } else {
-        throw new Error(
-          `Signing key not found or invalid response for kid: ${keyId}`
-        );
+      const signingKey = validateSigningKeyResponse(response, keyId);
+      const pinned = this.config.signingPublicKeys[keyId];
+      if (pinned && !equalPublicKeys(pinned, signingKey.public_key)) {
+        throw new CryptoError("Fetched signing key does not match the configured trust anchor");
       }
+      const existing = this.trustedPublicKeys.get(keyId);
+      if (existing && !equalPublicKeys(existing, signingKey.public_key)) {
+        throw new CryptoError("Signing key material changed for an existing key ID");
+      }
+      this.trustedPublicKeys.set(keyId, signingKey.public_key);
+      this.log("Successfully fetched signing key");
+      return signingKey;
     } catch (error) {
-      this.log(`Failed to fetch signing key for kid ${keyId}:`, error);
+      this.log("Failed to fetch signing key:", error);
       throw error;
     }
   }
@@ -619,11 +932,9 @@ export class LicenseSeatSDK {
    * @throws {Error} When inputs are invalid
    */
   async verifyOfflineToken(offlineTokenData, publicKeyB64) {
+    this.assertUsable();
     this.log("Attempting to verify offline token client-side.");
-
-    if (!offlineTokenData || !offlineTokenData.canonical || !offlineTokenData.signature) {
-      throw new Error("Invalid offline token object provided. Expected format: { token, signature, canonical }");
-    }
+    const envelope = validateOfflineEnvelope(offlineTokenData);
     if (!publicKeyB64) {
       throw new Error("Public key (Base64 encoded) is required.");
     }
@@ -637,18 +948,26 @@ export class LicenseSeatSDK {
     }
 
     try {
-      const messageBytes = new TextEncoder().encode(offlineTokenData.canonical);
-      const signatureBytes = base64UrlDecode(offlineTokenData.signature.value);
-      const publicKeyBytes = base64UrlDecode(publicKeyB64);
+      const messageBytes = new TextEncoder().encode(envelope.canonical);
+      const signatureBytes = base64UrlDecode(envelope.signature.value, {
+        expectedBytes: 64,
+        maxBytes: 64,
+      });
+      const publicKeyBytes = base64UrlDecode(publicKeyB64, {
+        expectedBytes: 32,
+        maxBytes: 32,
+      });
 
-      const isValid = ed.verify(signatureBytes, messageBytes, publicKeyBytes);
+      const isValid = await Promise.resolve(
+        ed.verify(signatureBytes, messageBytes, publicKeyBytes, { zip215: false })
+      );
 
       if (isValid) {
         this.log("Offline token signature VERIFIED successfully client-side.");
-        this.emit("offlineToken:verified", { token: offlineTokenData.token });
+        this.emit("offlineToken:verified", { keyId: envelope.signature.key_id });
       } else {
         this.log("Offline token signature INVALID client-side.");
-        this.emit("offlineToken:verificationFailed", { token: offlineTokenData.token });
+        this.emit("offlineToken:verificationFailed", { keyId: envelope.signature.key_id });
       }
       return isValid;
     } catch (error) {
@@ -666,12 +985,13 @@ export class LicenseSeatSDK {
    * @returns {import('./types.js').LicenseStatus} Current license status
    */
   getStatus() {
-    const license = this.cache.getLicense();
+    this.assertUsable();
+    const license = this.currentLicense;
     if (!license) {
       return { status: "inactive", message: "No license activated" };
     }
 
-    const validation = license.validation;
+    const validation = this.trustedValidation;
     if (!validation) {
       return { status: "pending", message: "License pending validation" };
     }
@@ -711,14 +1031,15 @@ export class LicenseSeatSDK {
   }
 
   /**
-   * Test API connectivity
-   * Makes a request to the health endpoint to verify connectivity.
-   * Note: To fully verify API key validity, attempt an actual operation like activate() or validateLicense().
+   * Test API authentication and the licenses:validate scope.
+   * Uses a protected, side-effect-free endpoint and never treats the public
+   * health endpoint as proof that a credential is valid.
    * @returns {Promise<{authenticated: boolean, healthy: boolean, api_version: string}>}
    * @throws {ConfigurationError} If API key is not configured
-   * @throws {APIError} If the health check fails
+   * @throws {APIError} If authentication fails or the response is invalid
    */
   async testAuth() {
+    this.assertUsable();
     if (!this.config.apiKey) {
       const err = new ConfigurationError("API key is required for auth test");
       this.emit("auth_test:error", { error: err });
@@ -727,11 +1048,26 @@ export class LicenseSeatSDK {
 
     try {
       this.emit("auth_test:start");
-      // Use health endpoint to verify API connectivity
-      const response = await this.apiCall("/health", { method: "GET" });
+      const response = await this.apiCall("/auth", {
+        method: "GET",
+        authenticated: true,
+      });
+      if (
+        response.object !== "authentication" ||
+        response.authenticated !== true ||
+        response.scope !== "licenses:validate" ||
+        typeof response.api_version !== "string"
+      ) {
+        throw new APIError("Invalid authentication response", 502, {
+          error: {
+            code: "invalid_response",
+            message: "Invalid authentication response",
+          },
+        });
+      }
       const result = {
-        authenticated: true, // API key was included in request
-        healthy: response.status === "healthy",
+        authenticated: true,
+        healthy: true,
         api_version: response.api_version,
       };
       this.emit("auth_test:success", result);
@@ -750,29 +1086,59 @@ export class LicenseSeatSDK {
    * @throws {APIError} When the API request fails
    */
   async heartbeat() {
+    this.assertUsable();
     if (!this.config.productSlug) {
       throw new ConfigurationError("productSlug is required for heartbeat");
     }
 
-    const cached = this.cache.getLicense();
-    if (!cached) {
+    this.requireApiKey();
+    const cached = this.currentLicense;
+    if (!cached || !this.trustedValidation?.valid) {
       this.log("No active license for heartbeat");
       return;
     }
 
-    const body = { device_id: cached.device_id };
+    const body = {
+      license_key: cached.license_key,
+      ...fingerprintPayload(cached.device_id),
+    };
+    const generation = this.stateGeneration;
 
-    const response = await this.apiCall(
-      `/products/${this.config.productSlug}/licenses/${encodeURIComponent(cached.license_key)}/heartbeat`,
-      {
-        method: "POST",
-        body: body,
+    try {
+      const rawResponse = await this.apiCall(
+        this.licenseActionPath("heartbeat"),
+        {
+          method: "POST",
+          body,
+          retryable: true,
+        }
+      );
+      const response = validateHeartbeatResponse(rawResponse, {
+        licenseKey: cached.license_key,
+        productSlug: this.config.productSlug,
+      });
+      if (
+        generation !== this.stateGeneration ||
+        !this.currentLicense ||
+        !constantTimeEqual(this.currentLicense.license_key, cached.license_key) ||
+        !constantTimeEqual(this.currentLicense.device_id, cached.device_id)
+      ) {
+        throw new LicenseError("Heartbeat was superseded by a newer state change", "operation_superseded");
       }
-    );
-
-    this.emit("heartbeat:success", response);
-    this.log("Heartbeat sent successfully");
-    return response;
+      this.emit("heartbeat:success", response);
+      this.log("Heartbeat sent successfully");
+      return response;
+    } catch (error) {
+      if (
+        generation === this.stateGeneration &&
+        this.currentLicense &&
+        constantTimeEqual(this.currentLicense.license_key, cached.license_key) &&
+        constantTimeEqual(this.currentLicense.device_id, cached.device_id)
+      ) {
+        this.revokeTrustedAuthorization(this.isRevocationError(error));
+      }
+      throw error;
+    }
   }
 
   /**
@@ -780,6 +1146,8 @@ export class LicenseSeatSDK {
    * @returns {void}
    */
   reset() {
+    this.assertUsable();
+    this.stateGeneration += 1;
     this.stopAutoValidation();
     this.stopHeartbeat();
     this.stopConnectivityPolling();
@@ -788,6 +1156,9 @@ export class LicenseSeatSDK {
       this.offlineRefreshTimer = null;
     }
     this.cache.clear();
+    this.currentLicense = null;
+    this.trustedValidation = null;
+    this.trustedPublicKeys = new Map(Object.entries(this.config.signingPublicKeys));
     this.lastOfflineValidation = null;
     this.currentAutoLicenseKey = null;
     this.emit("sdk:reset");
@@ -800,7 +1171,10 @@ export class LicenseSeatSDK {
    * @returns {void}
    */
   destroy() {
+    if (this.destroyed) return;
+    this.emit("sdk:destroyed");
     this.destroyed = true;
+    this.stateGeneration += 1;
     this.stopAutoValidation();
     this.stopHeartbeat();
     this.stopConnectivityPolling();
@@ -808,11 +1182,11 @@ export class LicenseSeatSDK {
       clearInterval(this.offlineRefreshTimer);
       this.offlineRefreshTimer = null;
     }
-    this.eventListeners = {};
-    this.cache.clear();
+    this.eventListeners = Object.create(null);
+    this.currentLicense = null;
+    this.trustedValidation = null;
     this.lastOfflineValidation = null;
     this.currentAutoLicenseKey = null;
-    this.emit("sdk:destroyed");
   }
 
   // ============================================================
@@ -826,8 +1200,18 @@ export class LicenseSeatSDK {
    * @returns {import('./types.js').EventUnsubscribe} Unsubscribe function
    */
   on(event, callback) {
+    this.assertUsable();
+    requireSafeText(event, "event name", {
+      min: 1,
+      max: 100,
+      pattern: /^[A-Za-z][A-Za-z0-9:_-]*$/,
+    });
+    if (typeof callback !== "function") throw new TypeError("Event callback must be a function");
     if (!this.eventListeners[event]) {
       this.eventListeners[event] = [];
+    }
+    if (this.eventListeners[event].length >= 100) {
+      throw new RangeError("Too many listeners registered for this event");
     }
     this.eventListeners[event].push(callback);
     return () => this.off(event, callback);
@@ -840,6 +1224,7 @@ export class LicenseSeatSDK {
    * @returns {void}
    */
   off(event, callback) {
+    if (typeof event !== "string" || typeof callback !== "function") return;
     if (this.eventListeners[event]) {
       this.eventListeners[event] = this.eventListeners[event].filter(
         (cb) => cb !== callback
@@ -857,11 +1242,14 @@ export class LicenseSeatSDK {
   emit(event, data) {
     this.log(`Event: ${event}`, data);
     if (this.eventListeners[event]) {
-      this.eventListeners[event].forEach((callback) => {
+      [...this.eventListeners[event]].forEach((callback) => {
         try {
           callback(data);
         } catch (error) {
-          console.error(`Error in event listener for ${event}:`, error);
+          console.error(
+            `[LicenseSeat SDK] Error in event listener for ${event}:`,
+            redactForLog(error, this.sensitiveValues())
+          );
         }
       });
     }
@@ -879,6 +1267,7 @@ export class LicenseSeatSDK {
    */
   startAutoValidation(licenseKey) {
     this.stopAutoValidation();
+    if (this.destroyed || !this.trustedValidation?.valid) return;
 
     this.currentAutoLicenseKey = licenseKey;
     const validationInterval = this.config.autoValidateInterval;
@@ -889,14 +1278,30 @@ export class LicenseSeatSDK {
       return;
     }
 
+    const generation = this.stateGeneration;
     const performAndReschedule = () => {
+      if (this.autoValidationInFlight || generation !== this.stateGeneration || this.destroyed) return;
+      this.autoValidationInFlight = true;
       this.validateLicense(licenseKey)
-        .then(() => {
-          this.heartbeat().catch((err) => this.log("Heartbeat failed:", err));
+        .then((result) => {
+          if (
+            result.valid &&
+            !result.offline &&
+            this.online &&
+            generation === this.stateGeneration &&
+            this.currentLicense &&
+            constantTimeEqual(this.currentLicense.license_key, licenseKey)
+          ) {
+            return this.heartbeat().catch((err) => this.log("Heartbeat failed:", err));
+          }
+          return undefined;
         })
         .catch((err) => {
           this.log("Auto-validation failed:", err);
-          this.emit("validation:auto-failed", { licenseKey, error: err });
+          this.emit("validation:auto-failed", { error: err });
+        })
+        .finally(() => {
+          this.autoValidationInFlight = false;
         });
       this.emit("autovalidation:cycle", {
         nextRunAt: new Date(Date.now() + validationInterval),
@@ -931,6 +1336,7 @@ export class LicenseSeatSDK {
    */
   startHeartbeat() {
     this.stopHeartbeat();
+    if (this.destroyed || !this.trustedValidation?.valid || !this.currentLicense) return;
 
     const interval = this.config.heartbeatInterval;
     if (!interval || interval <= 0) {
@@ -943,10 +1349,16 @@ export class LicenseSeatSDK {
       return;
     }
 
+    const generation = this.stateGeneration;
     this.heartbeatTimer = setInterval(() => {
+      if (this.heartbeatInFlight || generation !== this.stateGeneration || this.destroyed) return;
+      this.heartbeatInFlight = true;
       this.heartbeat()
         .then(() => this.emit("heartbeat:cycle", { nextRunAt: new Date(Date.now() + interval) }))
-        .catch((err) => this.log("Heartbeat timer failed:", err));
+        .catch((err) => this.log("Heartbeat timer failed:", err))
+        .finally(() => {
+          this.heartbeatInFlight = false;
+        });
     }, interval);
 
     // Emit initial cycle event immediately (like auto-validation does)
@@ -973,25 +1385,29 @@ export class LicenseSeatSDK {
    * @private
    */
   startConnectivityPolling() {
-    if (this.connectivityTimer) return;
+    if (this.connectivityTimer || this.destroyed || this.config.networkRecheckInterval <= 0) return;
 
     const healthCheck = async () => {
       try {
-        // New v1 API: GET /health
-        const res = await fetch(`${this.config.apiBaseUrl}/health`, {
+        await this.apiCall("/health", {
           method: "GET",
-          credentials: "omit",
+          authenticated: false,
+          retryable: false,
+          manageConnectivity: false,
         });
-        // Consume the response body to release the connection
-        await res.text().catch(() => {});
 
         if (!this.online) {
           this.online = true;
           this.emit("network:online");
-          if (this.currentAutoLicenseKey && !this.validationTimer) {
-            this.startAutoValidation(this.currentAutoLicenseKey);
+          const licenseKey =
+            this.currentAutoLicenseKey || this.currentLicense?.license_key;
+          this.stopConnectivityPolling();
+          if (licenseKey) {
+            void this.validateLicense(licenseKey).catch((error) => {
+              this.log("Validation after reconnect failed:", error);
+            });
           }
-          this.syncOfflineAssets();
+          return;
         }
         this.stopConnectivityPolling();
       } catch (err) {
@@ -1035,35 +1451,36 @@ export class LicenseSeatSDK {
     }
 
     this.syncingOfflineAssets = true;
+    const generation = this.stateGeneration;
+    const licenseKey = this.currentLicense?.license_key;
     try {
       const offline = await this.getOfflineToken();
+      if (
+        generation !== this.stateGeneration ||
+        !licenseKey ||
+        !this.currentLicense ||
+        !constantTimeEqual(this.currentLicense.license_key, licenseKey) ||
+        !this.trustedValidation?.valid
+      ) {
+        return;
+      }
       this.cache.setOfflineToken(offline);
 
-      const kid = offline.signature?.key_id || offline.token?.kid;
-      if (kid) {
-        const existingKey = this.cache.getPublicKey(kid);
-        if (!existingKey) {
-          const signingKey = await this.getSigningKey(kid);
-          this.cache.setPublicKey(kid, signingKey.public_key);
-        }
-      }
+      const kid = offline.signature.key_id;
 
       this.emit("offlineToken:ready", {
         kid: kid,
         exp: offline.token?.exp,
       });
 
-      // Verify freshly-cached assets
-      const res = await this.quickVerifyCachedOfflineLocal();
-      if (res) {
-        this.cache.updateValidation(res);
-        this.emit(
-          res.valid ? "validation:offline-success" : "validation:offline-failed",
-          res
-        );
-      }
+      // getOfflineToken() has already verified the signature and all bound
+      // claims. Preparing fallback material must never replace fresh online
+      // authorization with offline-derived state.
     } catch (err) {
       this.log("Failed to sync offline assets:", err);
+      if (this.isRevocationError(err)) {
+        this.revokeTrustedAuthorization(true);
+      }
     } finally {
       this.syncingOfflineAssets = false;
     }
@@ -1076,6 +1493,15 @@ export class LicenseSeatSDK {
    */
   scheduleOfflineRefresh() {
     if (this.offlineRefreshTimer) clearInterval(this.offlineRefreshTimer);
+    if (
+      this.destroyed ||
+      !this.config.offlineFallbackEnabled ||
+      this.config.maxOfflineDays <= 0 ||
+      this.config.offlineLicenseRefreshInterval <= 0
+    ) {
+      this.offlineRefreshTimer = null;
+      return;
+    }
     this.offlineRefreshTimer = setInterval(
       () => this.syncOfflineAssets(),
       this.config.offlineLicenseRefreshInterval
@@ -1089,76 +1515,12 @@ export class LicenseSeatSDK {
    * @returns {Promise<import('./types.js').ValidationResult>}
    */
   async verifyCachedOffline() {
+    this.assertUsable();
     const signed = this.cache.getOfflineToken();
     if (!signed) {
       return { valid: false, offline: true, code: "no_offline_token" };
     }
-
-    const kid = signed.signature?.key_id || signed.token?.kid;
-    let pub = kid ? this.cache.getPublicKey(kid) : null;
-    if (!pub) {
-      try {
-        const signingKey = await this.getSigningKey(kid);
-        pub = signingKey.public_key;
-        this.cache.setPublicKey(kid, pub);
-      } catch (e) {
-        return { valid: false, offline: true, code: "no_public_key" };
-      }
-    }
-
-    try {
-      const ok = await this.verifyOfflineToken(signed, pub);
-      if (!ok) {
-        return { valid: false, offline: true, code: "signature_invalid" };
-      }
-
-      const token = signed.token;
-      const cached = this.cache.getLicense();
-
-      // License key match
-      if (!cached || !constantTimeEqual(token.license_key || "", cached.license_key || "")) {
-        return { valid: false, offline: true, code: "license_mismatch" };
-      }
-
-      // Expiry check (exp is Unix timestamp in seconds)
-      const now = Date.now();
-      const expAt = token.exp ? token.exp * 1000 : null;
-      if (expAt && expAt < now) {
-        return { valid: false, offline: true, code: "expired" };
-      }
-
-      // Grace period check
-      if (!expAt && this.config.maxOfflineDays > 0) {
-        const pivot = cached.last_validated || cached.activated_at;
-        if (pivot) {
-          const ageMs = now - new Date(pivot).getTime();
-          if (ageMs > this.config.maxOfflineDays * 24 * 60 * 60 * 1000) {
-            return {
-              valid: false,
-              offline: true,
-              code: "grace_period_expired",
-            };
-          }
-        }
-      }
-
-      // Clock tamper detection
-      const lastSeen = this.cache.getLastSeenTimestamp();
-      if (lastSeen && now + this.config.maxClockSkewMs < lastSeen) {
-        return { valid: false, offline: true, code: "clock_tamper" };
-      }
-
-      this.cache.setLastSeenTimestamp(now);
-
-      const active = parseActiveEntitlements(token);
-      return {
-        valid: true,
-        offline: true,
-        ...(active.length ? { active_entitlements: active } : {}),
-      };
-    } catch (e) {
-      return { valid: false, offline: true, code: "verification_error" };
-    }
+    return this.verifyCachedOfflineEnvelope(signed);
   }
 
   /**
@@ -1170,47 +1532,77 @@ export class LicenseSeatSDK {
   async quickVerifyCachedOfflineLocal() {
     const signed = this.cache.getOfflineToken();
     if (!signed) return null;
+    return this.verifyCachedOfflineEnvelope(signed);
+  }
 
-    const kid = signed.signature?.key_id || signed.token?.kid;
-    const pub = kid ? this.cache.getPublicKey(kid) : null;
-    if (!pub) return null;
-
+  /**
+   * Verify a cached envelope without using localStorage as a signing-key trust
+   * anchor. A key must have been pinned in configuration or fetched over the
+   * hardened transport during this SDK instance's lifetime.
+   * @param {*} signed
+   * @returns {Promise<import('./types.js').ValidationResult>}
+   * @private
+   */
+  async verifyCachedOfflineEnvelope(signed) {
+    const identity = this.currentLicense || this.loadCachedIdentity();
+    if (!identity || !this.config.productSlug) {
+      return { valid: false, offline: true, code: "no_license" };
+    }
     try {
-      const ok = await this.verifyOfflineToken(signed, pub);
-      if (!ok) {
+      const envelope = validateOfflineEnvelope(signed);
+      const publicKey = await this.resolveTrustedSigningKey(
+        envelope.signature.key_id,
+        false
+      );
+      if (!(await this.verifyOfflineToken(envelope, publicKey))) {
         return { valid: false, offline: true, code: "signature_invalid" };
       }
-
-      const token = signed.token;
-      const cached = this.cache.getLicense();
-
-      // License key match check
-      if (!cached || !constantTimeEqual(token.license_key || "", cached.license_key || "")) {
-        return { valid: false, offline: true, code: "license_mismatch" };
-      }
-
-      // Expiry check (exp is Unix timestamp in seconds)
       const now = Date.now();
-      const expAt = token.exp ? token.exp * 1000 : null;
-      if (expAt && expAt < now) {
-        return { valid: false, offline: true, code: "expired" };
-      }
-
-      // Clock tamper detection
       const lastSeen = this.cache.getLastSeenTimestamp();
-      if (lastSeen && now + this.config.maxClockSkewMs < lastSeen) {
+      if (
+        now + this.config.maxClockSkewMs < this.lastTrustedTimeMs ||
+        (lastSeen !== null && now + this.config.maxClockSkewMs < lastSeen)
+      ) {
         return { valid: false, offline: true, code: "clock_tamper" };
       }
-
-      const active = parseActiveEntitlements(token);
+      const result = validateOfflineClaims(envelope, {
+        licenseKey: identity.license_key,
+        productSlug: this.config.productSlug,
+        fingerprint: identity.device_id,
+        nowMs: now,
+        maxClockSkewMs: this.config.maxClockSkewMs,
+        maxOfflineDays: this.config.maxOfflineDays,
+      });
+      return result;
+    } catch (error) {
+      this.log("Offline verification failed:", error);
       return {
-        valid: true,
+        valid: false,
         offline: true,
-        ...(active.length ? { active_entitlements: active } : {}),
+        code: this.offlineFailureCode(error),
       };
-    } catch (_) {
-      return { valid: false, offline: true, code: "verification_error" };
     }
+  }
+
+  /**
+   * Resolve a public key from configured/current-process trust only.
+   * Persisted public-key cache entries are intentionally never authoritative.
+   * @param {string} keyId
+   * @param {boolean} allowNetwork
+   * @returns {Promise<string>}
+   * @private
+   */
+  async resolveTrustedSigningKey(keyId, allowNetwork) {
+    requireKeyId(keyId);
+    const trusted = this.trustedPublicKeys.get(keyId);
+    if (trusted) return trusted;
+    if (!allowNetwork) {
+      throw new CryptoError(
+        "No trusted signing key is available. Pin signingPublicKeys for offline use across reloads."
+      );
+    }
+    const response = await this.getSigningKey(keyId);
+    return response.public_key;
   }
 
   // ============================================================
@@ -1223,103 +1615,237 @@ export class LicenseSeatSDK {
    * @param {Object} [options={}] - Fetch options
    * @param {string} [options.method="GET"] - HTTP method
    * @param {Object} [options.body] - Request body (will be JSON-stringified)
-   * @param {Object} [options.headers] - Additional headers
+   * @param {boolean} [options.authenticated=true] - Include API authentication
+   * @param {boolean} [options.retryable=true] - Permit retries for this operation
+   * @param {boolean} [options.manageConnectivity=true] - Update connectivity state
    * @returns {Promise<Object>} API response data
    * @throws {APIError} When the request fails after all retries
    * @private
    */
   async apiCall(endpoint, options = {}) {
-    const url = `${this.config.apiBaseUrl}${endpoint}`;
+    this.assertUsable();
+    const url = this.buildRequestUrl(endpoint);
     let lastError;
 
-    const headers = {
-      "Content-Type": "application/json",
+    const headers = /** @type {Record<string, string>} */ ({
       Accept: "application/json",
-      ...options.headers,
-    };
+    });
 
-    if (this.config.apiKey) {
+    const authenticated = options.authenticated !== false;
+    if (authenticated && this.config.apiKey) {
       headers["Authorization"] = `Bearer ${this.config.apiKey}`;
-    } else {
-      this.log(
-        "[Warning] No API key configured for LicenseSeat SDK. Authenticated endpoints will fail."
-      );
+    } else if (authenticated) {
+      throw new ConfigurationError("API key is required for authenticated API requests");
     }
 
-    // Inject telemetry into POST request bodies
-    const method = options.method || "GET";
+    const method = String(options.method || "GET").toUpperCase();
+    if (!["GET", "POST"].includes(method)) {
+      throw new ConfigurationError("Unsupported HTTP method");
+    }
     let body = options.body;
+    if (method === "GET" && body !== undefined) {
+      throw new ConfigurationError("GET API requests cannot include a body");
+    }
     if (method === "POST" && body && this.config.telemetryEnabled !== false) {
-      body = { ...body, telemetry: collectTelemetry(SDK_VERSION, {
-        appVersion: this.config.appVersion,
-        appBuild: this.config.appBuild,
-      }) };
+      body = {
+        ...cloneBoundedJson(body),
+        telemetry: cloneBoundedJson(
+          collectTelemetry(SDK_VERSION, {
+            appVersion: this.config.appVersion,
+            appBuild: this.config.appBuild,
+            browserHighEntropyValues: this.browserHighEntropyValues,
+          })
+        ),
+      };
+    }
+    const serializedBody = body === undefined ? undefined : JSON.stringify(cloneBoundedJson(body));
+    if (serializedBody !== undefined) headers["Content-Type"] = "application/json";
+    if (serializedBody && new TextEncoder().encode(serializedBody).byteLength > this.config.maxResponseBytes) {
+      throw new ConfigurationError("API request body exceeds the configured size limit");
     }
 
-    for (let attempt = 0; attempt <= this.config.maxRetries; attempt++) {
+    const maxRetries = options.retryable === false ? 0 : this.config.maxRetries;
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      let controller = null;
+      let timeout = null;
+      let deadlineTimer = null;
+      let signal;
       try {
-        const response = await fetch(url, {
-          method: method,
-          headers: headers,
-          body: body ? JSON.stringify(body) : undefined,
+        const signalConstructor = /** @type {any} */ (
+          new Request(url).signal.constructor
+        );
+        signal = typeof signalConstructor.timeout === "function"
+          ? signalConstructor.timeout(this.config.requestTimeoutMs)
+          : undefined;
+      } catch (_) {
+        signal = undefined;
+      }
+      if (!signal) {
+        controller = new AbortController();
+        signal = controller.signal;
+        timeout = setTimeout(() => controller.abort(), this.config.requestTimeoutMs);
+        if (typeof timeout.unref === "function") timeout.unref();
+      }
+      try {
+        /** @type {RequestInit} */
+        const requestOptions = {
+          method,
+          headers,
+          body: serializedBody,
           credentials: "omit",
+          redirect: "manual",
+          cache: "no-store",
+          referrerPolicy: "no-referrer",
+          signal,
+        };
+        const performFetch = async () => {
+          try {
+            return await fetch(url, requestOptions);
+          } catch (error) {
+            // Fetch and AbortSignal can come from different JavaScript realms
+            // (iframes, jsdom, or instrumentation). Retry only the synchronous
+            // brand-check failure without a signal; the independent deadline
+            // below still fails closed for the caller.
+            if (
+              error instanceof TypeError &&
+              /signal.*instance of abortsignal/i.test(error.message)
+            ) {
+              return fetch(url, { ...requestOptions, signal: undefined });
+            }
+            throw error;
+          }
+        };
+        const deadline = new Promise((_, reject) => {
+          deadlineTimer = setTimeout(() => {
+            const error = new Error("API request timed out");
+            error.name = "TimeoutError";
+            reject(error);
+          }, this.config.requestTimeoutMs);
+          if (typeof deadlineTimer.unref === "function") deadlineTimer.unref();
         });
-
-        const data = await response.json();
+        const response = await Promise.race([performFetch(), deadline]);
+        if (
+          response.type === "opaqueredirect" ||
+          (response.status >= 300 && response.status < 400)
+        ) {
+          throw new APIError("API redirects are refused", response.status || 310, {
+            error: { code: "redirect_refused", message: "API redirects are refused" },
+          });
+        }
+        let text;
+        let data;
+        try {
+          text = await Promise.race([
+            readBoundedResponseText(response, this.config.maxResponseBytes),
+            deadline,
+          ]);
+          if (!text) throw new TypeError("API response body is empty");
+          const contentType = response.headers.get("content-type") || "";
+          if (!/^application\/(?:[A-Za-z0-9.+-]*\+)?json(?:\s*;|$)/i.test(contentType)) {
+            throw new TypeError("API response Content-Type is not JSON");
+          }
+          data = parseApiJson(text, this.config.maxResponseBytes);
+          if (!data || typeof data !== "object" || Array.isArray(data)) {
+            throw new TypeError("API response JSON must be an object");
+          }
+        } catch (error) {
+          if (
+            error instanceof Error &&
+            (error.name === "AbortError" || error.name === "TimeoutError")
+          ) {
+            throw error;
+          }
+          throw new APIError("Invalid API response", 502, {
+            error: {
+              code: "invalid_response",
+              message: error instanceof Error ? error.message : "Invalid API response",
+            },
+          });
+        }
 
         if (!response.ok) {
           // Handle new error format: { error: { code, message, details } }
           // Also support legacy format: { error: "message", reason_code: "code" }
           const errorObj = data.error;
           let errorMessage = "Request failed";
-          if (typeof errorObj === "object" && errorObj !== null) {
-            errorMessage = errorObj.message || "Request failed";
+          if (isRecord(errorObj)) {
+            errorMessage = safeErrorMessage(errorObj.message);
           } else if (typeof errorObj === "string") {
-            errorMessage = errorObj;
+            errorMessage = safeErrorMessage(errorObj);
+          } else {
+            errorMessage = safeErrorMessage(data.message);
           }
-          throw new APIError(errorMessage, response.status, data);
+          const apiError = new APIError(errorMessage, response.status, data);
+          const retryAfter = response.headers.get("retry-after");
+          if (retryAfter && /^\d+$/.test(retryAfter)) {
+            apiError.retryAfterMs = Math.min(Number(retryAfter) * 1000, 60_000);
+          }
+          throw apiError;
         }
 
         // Back online
-        if (!this.online) {
+        if (options.manageConnectivity !== false && !this.online) {
           this.online = true;
           this.emit("network:online");
         }
 
-        this.stopConnectivityPolling();
+        if (options.manageConnectivity !== false) this.stopConnectivityPolling();
 
-        if (!this.validationTimer && this.currentAutoLicenseKey) {
+        if (
+          options.manageConnectivity !== false &&
+          !this.validationTimer &&
+          this.currentAutoLicenseKey &&
+          this.trustedValidation?.valid
+        ) {
           this.startAutoValidation(this.currentAutoLicenseKey);
         }
 
         return data;
       } catch (error) {
-        const networkFailure =
-          (error instanceof TypeError && error.message.includes("fetch")) ||
-          (error instanceof APIError && error.status === 0);
+        let normalizedError = error;
+        if (
+          error instanceof Error &&
+          (error.name === "AbortError" || error.name === "TimeoutError")
+        ) {
+          normalizedError = new APIError("API request timed out", 0, {
+            error: { code: "request_timeout", message: "API request timed out" },
+          });
+        } else if (!(error instanceof APIError) && error instanceof TypeError) {
+          normalizedError = new APIError("Network request failed", 0, {
+            error: { code: "network_error", message: "Network request failed" },
+          });
+        }
+        const networkFailure = normalizedError instanceof APIError && normalizedError.status === 0;
 
-        if (networkFailure && this.online) {
+        if (options.manageConnectivity !== false && networkFailure && this.online) {
           this.online = false;
-          this.emit("network:offline", { error });
+          this.emit("network:offline", { error: normalizedError });
           this.stopAutoValidation();
+          this.stopHeartbeat();
           this.startConnectivityPolling();
         }
 
-        lastError = error;
+        lastError = normalizedError;
 
         const shouldRetry =
-          attempt < this.config.maxRetries && this.shouldRetryError(error);
+          attempt < maxRetries && this.shouldRetryError(normalizedError);
 
         if (shouldRetry) {
-          const delay = this.config.retryDelay * Math.pow(2, attempt);
+          const retryAfter = normalizedError instanceof APIError
+            ? normalizedError.retryAfterMs
+            : undefined;
+          const delay = retryAfter ?? Math.min(this.config.retryDelay * Math.pow(2, attempt), 60_000);
           this.log(
             `Retry attempt ${attempt + 1} after ${delay}ms for error:`,
-            error.message
+            normalizedError
           );
           await sleep(delay);
         } else {
-          throw error;
+          throw normalizedError;
         }
+      } finally {
+        if (timeout !== null) clearTimeout(timeout);
+        if (deadlineTimer !== null) clearTimeout(deadlineTimer);
       }
     }
 
@@ -1333,15 +1859,10 @@ export class LicenseSeatSDK {
    * @private
    */
   shouldRetryError(error) {
-    if (error instanceof TypeError && error.message.includes("fetch")) {
-      return true;
-    }
-
     if (error instanceof APIError) {
       const status = error.status;
 
-      // Retry on server errors (5xx) except 500 and 501
-      if (status >= 502 && status < 600) {
+      if (status >= 500 && status < 600 && status !== 501) {
         return true;
       }
 
@@ -1360,11 +1881,285 @@ export class LicenseSeatSDK {
   // Utilities
   // ============================================================
 
+  /** @private */
+  assertUsable() {
+    if (this.destroyed) {
+      throw new LicenseError(
+        "This LicenseSeat SDK instance has been destroyed",
+        "sdk_destroyed"
+      );
+    }
+  }
+
+  /** @private */
+  requireApiKey() {
+    if (!this.config.apiKey) {
+      throw new ConfigurationError("API key is required for this operation");
+    }
+  }
+
+  /** @returns {string} @private */
+  getOrCreateDeviceId() {
+    const existing = this.cache.getInstallationId();
+    if (existing) {
+      try {
+        return requireFingerprint(existing);
+      } catch (_) {
+        // Replace malformed storage with a fresh strong identifier.
+      }
+    }
+    let generated;
+    try {
+      generated = generateDeviceId();
+    } catch (error) {
+      throw new ConfigurationError(
+        error instanceof Error
+          ? error.message
+          : "Secure device ID generation is unavailable"
+      );
+    }
+    requireFingerprint(generated);
+    this.cache.setInstallationId(generated);
+    return generated;
+  }
+
+  /**
+   * @param {string} action
+   * @returns {string}
+   * @private
+   */
+  licenseActionPath(action) {
+    const productSlug = requireProductSlug(this.config.productSlug);
+    requireSafeText(action, "license action", {
+      min: 1,
+      max: 64,
+      pattern: /^[a-z][a-z-]*$/,
+    });
+    return `/products/${encodeURIComponent(productSlug)}/licenses/${action}`;
+  }
+
+  /**
+   * @param {string} endpoint
+   * @returns {string}
+   * @private
+   */
+  buildRequestUrl(endpoint) {
+    if (
+      typeof endpoint !== "string" ||
+      !endpoint.startsWith("/") ||
+      endpoint.length > 4096 ||
+      /[\\?#\u0000-\u001f\u007f]/.test(endpoint)
+    ) {
+      throw new ConfigurationError("API request path is invalid");
+    }
+    const base = new URL(this.config.apiBaseUrl);
+    const combined = new URL(`${this.config.apiBaseUrl}${endpoint}`);
+    const basePath = base.pathname.replace(/\/+$/, "");
+    if (
+      combined.origin !== base.origin ||
+      combined.username ||
+      combined.password ||
+      !(combined.pathname === basePath ||
+        combined.pathname.startsWith(`${basePath}/`))
+    ) {
+      throw new ConfigurationError("API request escaped the configured origin");
+    }
+    return combined.toString();
+  }
+
+  /**
+   * Load only identity fields needed for revalidation. Persisted validation
+   * results are ignored because localStorage is attacker-writable.
+   * @returns {import('./types.js').CachedLicense|null}
+   * @private
+   */
+  loadCachedIdentity() {
+    const cached = this.cache.getLicense();
+    if (!cached) return null;
+    try {
+      const licenseKey = requireLicenseKey(cached.license_key);
+      const deviceId = requireFingerprint(cached.device_id);
+      requireSafeText(cached.activated_at, "cached activation timestamp", {
+        min: 20,
+        max: 40,
+      });
+      requireSafeText(cached.last_validated, "cached validation timestamp", {
+        min: 20,
+        max: 40,
+      });
+      if (
+        !Number.isFinite(Date.parse(cached.activated_at)) ||
+        !Number.isFinite(Date.parse(cached.last_validated))
+      ) {
+        throw new TypeError("Cached timestamps are invalid");
+      }
+      return {
+        license_key: licenseKey,
+        device_id: deviceId,
+        activated_at: cached.activated_at,
+        last_validated: cached.last_validated,
+      };
+    } catch (_) {
+      this.cache.clearLicense();
+      this.cache.clearOfflineToken();
+      return null;
+    }
+  }
+
+  /** @private */
+  recordTrustedTime(timestamp) {
+    if (!Number.isSafeInteger(timestamp) || timestamp < 0) return;
+    this.lastTrustedTimeMs = Math.max(this.lastTrustedTimeMs, timestamp);
+    this.cache.setLastSeenTimestamp(this.lastTrustedTimeMs);
+  }
+
+  /**
+   * @param {boolean} clearOffline
+   * @private
+   */
+  revokeTrustedAuthorization(clearOffline) {
+    this.stateGeneration += 1;
+    if (!this.trustedValidation || this.trustedValidation.valid) {
+      this.trustedValidation = null;
+    }
+    this.stopAutoValidation();
+    this.stopHeartbeat();
+    if (this.offlineRefreshTimer) {
+      clearInterval(this.offlineRefreshTimer);
+      this.offlineRefreshTimer = null;
+    }
+    this.currentAutoLicenseKey = null;
+    if (clearOffline) this.cache.clearOfflineToken();
+  }
+
+  /** @private */
+  clearLicenseState() {
+    this.stateGeneration += 1;
+    this.revokeTrustedAuthorization(true);
+    this.stopConnectivityPolling();
+    this.cache.clear();
+    this.currentLicense = null;
+    this.trustedValidation = null;
+    this.trustedPublicKeys = new Map(
+      Object.entries(this.config.signingPublicKeys)
+    );
+  }
+
+  /**
+   * @param {*} error
+   * @returns {boolean}
+   * @private
+   */
+  isRevocationError(error) {
+    if (!(error instanceof APIError)) return false;
+    const code = apiErrorCode(error.data);
+    return [
+      "revoked",
+      "license_revoked",
+      "suspended",
+      "license_suspended",
+      "expired",
+      "license_expired",
+      "not_active",
+      "license_not_active",
+    ].includes(code);
+  }
+
+  /**
+   * @param {*} error
+   * @returns {boolean}
+   * @private
+   */
+  isAlreadyGoneError(error) {
+    if (!(error instanceof APIError)) return false;
+    const code = apiErrorCode(error.data);
+    if ([404, 410].includes(error.status)) {
+      return [
+        "activation_not_found",
+        "license_not_found",
+        "already_deactivated",
+        "revoked",
+        "license_revoked",
+      ].includes(code);
+    }
+    return (
+      error.status === 422 &&
+      [
+        "revoked",
+        "license_revoked",
+        "already_deactivated",
+        "not_active",
+        "suspended",
+        "license_suspended",
+        "expired",
+        "license_expired",
+      ].includes(code)
+    );
+  }
+
+  /**
+   * @param {*} error
+   * @returns {string}
+   * @private
+   */
+  offlineFailureCode(error) {
+    const message = error instanceof Error ? error.message.toLowerCase() : "";
+    if (message.includes("trusted signing key")) return "untrusted_public_key";
+    if (message.includes("canonical") || message.includes("does not match token")) {
+      return "token_mismatch";
+    }
+    if (message.includes("signature")) return "signature_invalid";
+    if (message.includes("product identity")) return "product_mismatch";
+    if (message.includes("license identity")) return "license_mismatch";
+    if (message.includes("device identity")) return "device_mismatch";
+    if (message.includes("grace period")) return "grace_period_expired";
+    if (message.includes("disabled by local policy")) return "offline_disabled";
+    if (message.includes("expired")) return "expired";
+    if (message.includes("not yet valid")) return "not_yet_valid";
+    return "verification_error";
+  }
+
+  /** @returns {string[]} @private */
+  sensitiveValues() {
+    return [
+      this.config.apiKey,
+      this.currentLicense?.license_key,
+      this.currentLicense?.device_id,
+      ...this.transientSecrets.keys(),
+    ].filter((value) => typeof value === "string");
+  }
+
+  /**
+   * Keep request-bound secrets redacted until the operation and all of its
+   * event/error logging have completed. Reference counts make concurrent
+   * operations with the same credential safe.
+   * @param {...*} values
+   * @returns {() => void}
+   * @private
+   */
+  trackSensitiveValues(...values) {
+    const secrets = values.filter((value) => typeof value === "string" && value.length >= 4);
+    for (const secret of secrets) {
+      this.transientSecrets.set(secret, (this.transientSecrets.get(secret) || 0) + 1);
+    }
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      for (const secret of secrets) {
+        const count = this.transientSecrets.get(secret) || 0;
+        if (count <= 1) this.transientSecrets.delete(secret);
+        else this.transientSecrets.set(secret, count - 1);
+      }
+    };
+  }
+
   /**
    * Get CSRF token from meta tag
    * @returns {string} CSRF token or empty string
    */
   getCsrfToken() {
+    this.assertUsable();
     return getCsrfToken();
   }
 
@@ -1376,7 +2171,11 @@ export class LicenseSeatSDK {
    */
   log(...args) {
     if (this.config.debug) {
-      console.log("[LicenseSeat SDK]", ...args);
+      const secrets = this.sensitiveValues();
+      console.log(
+        "[LicenseSeat SDK]",
+        ...args.map((argument) => redactForLog(argument, secrets))
+      );
     }
   }
 }
@@ -1417,6 +2216,7 @@ export function configure(config, force = false) {
     );
     return sharedInstance;
   }
+  if (sharedInstance) sharedInstance.destroy();
   sharedInstance = new LicenseSeatSDK(config);
   return sharedInstance;
 }
