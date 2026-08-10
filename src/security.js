@@ -243,6 +243,7 @@ export function normalizeConfig(defaults, input) {
     "debug",
     "offlineFallbackEnabled",
     "telemetryEnabled",
+    "browserHighEntropyTelemetryEnabled",
   ]) {
     requireBoolean(config[name], name);
   }

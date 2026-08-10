@@ -29,7 +29,10 @@ import {
   sleep,
   getCsrfToken,
 } from "./utils.js";
-import { collectTelemetry } from "./telemetry.js";
+import {
+  collectBrowserHighEntropyTelemetry,
+  collectTelemetry,
+} from "./telemetry.js";
 import {
   cloneBoundedJson,
   isRecord,
@@ -78,6 +81,7 @@ const DEFAULT_CONFIG = {
   maxClockSkewMs: 5 * 60 * 1000, // 5 minutes
   autoInitialize: true,
   telemetryEnabled: true, // Set false to disable telemetry (e.g. for GDPR compliance)
+  browserHighEntropyTelemetryEnabled: false, // Explicit opt-in for UA Client Hints
   appVersion: null, // User-provided app version, sent as app_version in telemetry
   appBuild: null, // User-provided app build, sent as app_build in telemetry
   requestTimeoutMs: 15000,
@@ -297,6 +301,12 @@ export class LicenseSeatSDK {
     /** @type {number} */
     this.validationSequence = 0;
 
+    /** @type {Readonly<Record<string, string>>} */
+    this.browserHighEntropyValues = Object.freeze({});
+
+    /** @type {Promise<void>|null} */
+    this.browserHighEntropyTelemetryPromise = null;
+
     // Enable synchronous SHA512 for noble-ed25519
     if (ed && ed.etc && sha512) {
       ed.etc.sha512Sync = (...m) => sha512(ed.etc.concatBytes(...m));
@@ -327,6 +337,7 @@ export class LicenseSeatSDK {
       productSlug: this.config.productSlug,
       offlineFallbackEnabled: this.config.offlineFallbackEnabled,
     });
+    this.beginBrowserHighEntropyTelemetryCollection();
 
     const cachedLicense = this.loadCachedIdentity();
     if (cachedLicense) {
@@ -375,6 +386,29 @@ export class LicenseSeatSDK {
         });
       }
     }
+  }
+
+  /**
+   * Start optional UA Client Hint collection without delaying licensing work.
+   * Values are never persisted and a rejected/denied browser request is an
+   * ordinary empty result.
+   * @returns {void}
+   * @private
+   */
+  beginBrowserHighEntropyTelemetryCollection() {
+    if (
+      this.browserHighEntropyTelemetryPromise ||
+      this.config.telemetryEnabled === false ||
+      this.config.browserHighEntropyTelemetryEnabled !== true
+    ) {
+      return;
+    }
+
+    this.browserHighEntropyTelemetryPromise = collectBrowserHighEntropyTelemetry()
+      .then((values) => {
+        if (!this.destroyed) this.browserHighEntropyValues = values;
+      })
+      .catch(() => {});
   }
 
   /**
@@ -1619,6 +1653,7 @@ export class LicenseSeatSDK {
           collectTelemetry(SDK_VERSION, {
             appVersion: this.config.appVersion,
             appBuild: this.config.appBuild,
+            browserHighEntropyValues: this.browserHighEntropyValues,
           })
         ),
       };

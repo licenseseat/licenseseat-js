@@ -10,6 +10,12 @@
  */
 
 const MAX_TELEMETRY_TEXT_BYTES = 255;
+const HIGH_ENTROPY_HINTS = Object.freeze([
+  "platformVersion",
+  "architecture",
+  "model",
+]);
+const EMPTY_HIGH_ENTROPY_VALUES = Object.freeze({});
 
 /**
  * Validate a short telemetry string without relying on ambient encoders that a
@@ -90,6 +96,55 @@ function safeNumber(detector, { minimum, maximum, integer = false }) {
 }
 
 /**
+ * Request the narrowly-scoped Chromium UA Client Hint values used by the
+ * existing telemetry schema. Callers must opt in before invoking this helper.
+ * The result is bounded, immutable, process-local, and safe to pass back to
+ * collectTelemetry; unsupported, denied, malformed, or hostile environments
+ * resolve to an empty object.
+ *
+ * @returns {Promise<Readonly<Record<string, string>>>}
+ */
+export async function collectBrowserHighEntropyTelemetry() {
+  try {
+    if (typeof navigator === "undefined") return EMPTY_HIGH_ENTROPY_VALUES;
+    const userAgentData = navigator.userAgentData;
+    const getHighEntropyValues = userAgentData?.getHighEntropyValues;
+    if (typeof getHighEntropyValues !== "function") return EMPTY_HIGH_ENTROPY_VALUES;
+
+    const values = await Reflect.apply(getHighEntropyValues, userAgentData, [
+      [...HIGH_ENTROPY_HINTS],
+    ]);
+    if (!values || typeof values !== "object") return EMPTY_HIGH_ENTROPY_VALUES;
+
+    const result = {};
+    const platformVersion = safeText(
+      () => values.platformVersion,
+      /^[A-Za-z0-9._+-]+$/
+    );
+    const architecture = safeText(
+      () => values.architecture,
+      /^[A-Za-z0-9._+-]+$/
+    );
+    const model = safeText(() => values.model);
+    if (platformVersion) result.platformVersion = platformVersion;
+    if (architecture) result.architecture = architecture;
+    if (model) result.model = model;
+    return Object.freeze(result);
+  } catch (_) {
+    return EMPTY_HIGH_ENTROPY_VALUES;
+  }
+}
+
+function highEntropyValue(options, key) {
+  try {
+    const values = options && options.browserHighEntropyValues;
+    return values && values[key];
+  } catch (_) {
+    return null;
+  }
+}
+
+/**
  * Detect the current OS name
  * @returns {string} OS name ("Windows", "macOS", "Linux", "iOS", "Android", or "Unknown")
  * @private
@@ -129,7 +184,10 @@ function detectOSName() {
  * @returns {string|null} OS version string or null
  * @private
  */
-function detectOSVersion() {
+function detectOSVersion(options) {
+  const highEntropyVersion = highEntropyValue(options, "platformVersion");
+  if (highEntropyVersion) return highEntropyVersion;
+
   // Node.js
   if (typeof process !== "undefined" && process.version) {
     // Avoid eval/new Function based CommonJS loading. In ESM/browser bundles,
@@ -186,7 +244,10 @@ function detectPlatform() {
  * @returns {string|null}
  * @private
  */
-function detectDeviceModel() {
+function detectDeviceModel(options) {
+  const highEntropyModel = highEntropyValue(options, "model");
+  if (highEntropyModel) return highEntropyModel;
+
   try {
     if (typeof navigator !== "undefined" && navigator.userAgentData) {
       return navigator.userAgentData.model || null;
@@ -287,7 +348,10 @@ function detectDeviceType() {
  * @returns {string|null} "arm64", "x64", "x86", "arm", or null
  * @private
  */
-function detectArchitecture() {
+function detectArchitecture(options) {
+  const highEntropyArchitecture = highEntropyValue(options, "architecture");
+  if (highEntropyArchitecture) return highEntropyArchitecture;
+
   try {
     // Node.js / Bun
     if (typeof process !== "undefined" && process.arch) {
@@ -492,6 +556,7 @@ function detectRuntimeVersion() {
  * @param {Object} [options] - Additional options
  * @param {string} [options.appVersion] - User-provided app version
  * @param {string} [options.appBuild] - User-provided app build
+ * @param {Readonly<Record<string, string>>} [options.browserHighEntropyValues] - Opt-in, in-memory UA Client Hint values
  * @returns {Object} Telemetry data object
  */
 export function collectTelemetry(sdkVersion, options) {
@@ -501,14 +566,14 @@ export function collectTelemetry(sdkVersion, options) {
     sdk_version: safeText(() => sdkVersion),
     sdk_name: 'js',
     os_name: safeText(detectOSName),
-    os_version: safeText(detectOSVersion),
+    os_version: safeText(() => detectOSVersion(options), /^[A-Za-z0-9._+-]+$/),
     platform: safeText(detectPlatform, /^(?:node|electron|react-native|deno|bun|browser|unknown)$/),
-    device_model: safeText(detectDeviceModel),
+    device_model: safeText(() => detectDeviceModel(options)),
     device_type: safeText(detectDeviceType, /^(?:phone|tablet|desktop|server|unknown)$/),
     locale: locale,
     timezone: safeText(detectTimezone, /^[A-Za-z0-9_+./:-]+$/),
     language: safeText(() => locale && locale.split(/[-_]/)[0].toLowerCase(), /^[a-z]{2,8}$/),
-    architecture: safeText(detectArchitecture, /^[A-Za-z0-9._+-]+$/),
+    architecture: safeText(() => detectArchitecture(options), /^[A-Za-z0-9._+-]+$/),
     cpu_cores: safeNumber(detectCpuCores, { minimum: 1, maximum: 65_536, integer: true }),
     memory_gb: safeNumber(detectMemoryGb, { minimum: 0.1, maximum: 1_048_576 }),
     screen_resolution: safeText(detectScreenResolution, /^[1-9]\d{0,6}x[1-9]\d{0,6}$/),

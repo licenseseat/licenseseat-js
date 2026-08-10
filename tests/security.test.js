@@ -47,6 +47,7 @@ const BASE_CONFIG = Object.freeze({
   maxClockSkewMs: 300_000,
   autoInitialize: true,
   telemetryEnabled: true,
+  browserHighEntropyTelemetryEnabled: false,
   appVersion: null,
   appBuild: null,
   requestTimeoutMs: 15_000,

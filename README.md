@@ -62,6 +62,21 @@ pnpm add @licenseseat/js
 </script>
 ```
 
+#### Cross-origin API access
+
+Browser/CDN integrations call `https://licenseseat.com` from the application's
+own origin. The hosted LicenseSeat API permits this for `/api/v1/*`, including
+the preflighted `Authorization` and `Content-Type` headers used by the SDK.
+There is no per-origin dashboard setting required. The SDK deliberately uses
+bearer headers and does not send cookies or set Fetch's `credentials` option.
+
+If a self-hosted or older deployment returns no
+`Access-Control-Allow-Origin` header, that server must enable CORS for its
+licensing API namespace; changing SDK configuration or using a different
+publishable key cannot add a missing response header. Do not enable
+credentialed wildcard CORS. Restrict the route, methods, and request headers
+to the SDK contract instead.
+
 ---
 
 ## Quick Start
@@ -158,6 +173,7 @@ const sdk = new LicenseSeat({
 
   // Telemetry
   telemetryEnabled: true,                     // Set false to disable (e.g. GDPR)
+  browserHighEntropyTelemetryEnabled: false,  // Opt in to Chromium UA-CH enrichment
   appVersion: '1.2.0',                        // Your app version (sent in telemetry)
   appBuild: '42',                             // Your app build number (sent in telemetry)
 
@@ -195,6 +211,7 @@ const sdk = new LicenseSeat({
 | `autoInitialize`         | `boolean` | `true`                             | Auto-initialize and validate cached license               |
 | `heartbeatInterval`      | `number`  | `300000`                           | Heartbeat interval in ms (5 minutes). Set `0` to disable  |
 | `telemetryEnabled`       | `boolean` | `true`                             | Attach bounded platform telemetry to POST requests        |
+| `browserHighEntropyTelemetryEnabled` | `boolean` | `false`                  | Opt in to in-memory Chromium platform version, architecture, and model hints |
 | `appVersion`             | `string`  | `null`                             | Your app version string (sent as `app_version` in telemetry) |
 | `appBuild`               | `string`  | `null`                             | Your app build identifier (sent as `app_build` in telemetry) |
 | `offlineFallbackEnabled` | `boolean` | `false`                            | Enable offline validation on network errors               |
@@ -665,6 +682,26 @@ Telemetry is **enabled by default** and can be disabled at any time.
 
 Fields that cannot be detected in the current environment are omitted (not sent as `null`).
 
+Browsers intentionally reduce several values in the ordinary user-agent
+surface. To request Chromium's higher-entropy `platformVersion`,
+`architecture`, and `model` values, opt in explicitly:
+
+```javascript
+const sdk = new LicenseSeat({
+  apiKey: 'your-key',
+  productSlug: 'your-product',
+  browserHighEntropyTelemetryEnabled: true
+});
+```
+
+The request starts during `initialize()` but never delays activation,
+validation, or another API call. Successfully returned values are bounded and
+cached only in this SDK instance's memory; they are not written to
+`localStorage`. Unsupported browsers, denied permissions, invalid values, and
+failed requests simply use the ordinary reduced telemetry. Setting
+`telemetryEnabled: false` prevents both the high-entropy request and telemetry
+attachment.
+
 ### Providing App Version
 
 Pass your own app version and build number via configuration so they appear in telemetry:
@@ -696,7 +733,9 @@ When telemetry is disabled, no device or environment data is attached to API req
 
 The SDK does not intentionally collect names, email addresses, or application data in telemetry. Platform, locale, timezone, model, and display attributes can nevertheless be personal data or contribute to device fingerprinting when combined. The server will also ordinarily observe the request IP address independently of this telemetry object. Document the collection, apply appropriate retention/access controls, and assess the privacy rules that apply to your deployment.
 
-Telemetry is enabled by default. Set `telemetryEnabled: false` to disable SDK collection completely.
+Ordinary telemetry is enabled by default, but high-entropy browser hints are
+disabled by default and require the separate opt-in above. Set
+`telemetryEnabled: false` to disable SDK collection completely.
 
 ---
 

@@ -22,6 +22,7 @@
  * @property {number} [maxClockSkewMs=300000] - Maximum allowed clock skew in ms for offline validation (default: 5 minutes)
  * @property {boolean} [autoInitialize=true] - Automatically initialize and validate cached license on construction
  * @property {boolean} [telemetryEnabled=true] - Enable bounded platform telemetry on POST requests; assess applicable privacy obligations
+ * @property {boolean} [browserHighEntropyTelemetryEnabled=false] - Explicitly request platformVersion, architecture, and model through Chromium UA Client Hints without delaying licensing requests
  * @property {number} [heartbeatInterval=300000] - Interval in ms between automatic heartbeats (default: 5 minutes, set 0 to disable)
  * @property {string} [appVersion] - User-provided app version string, sent as app_version in telemetry
  * @property {string} [appBuild] - User-provided app build identifier, sent as app_build in telemetry

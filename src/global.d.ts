@@ -15,6 +15,13 @@ interface NavigatorUAData {
   platform: string;
   architecture?: string;
   model?: string;
+  getHighEntropyValues?(hints: string[]): Promise<NavigatorUAHighEntropyValues>;
+}
+
+interface NavigatorUAHighEntropyValues {
+  architecture?: string;
+  model?: string;
+  platformVersion?: string;
 }
 
 interface Navigator {
