@@ -6,6 +6,80 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.5.0] - 2026-08-10
+
+### Security
+
+- Moved license keys out of lifecycle request URLs and into bounded JSON request
+  bodies on the product-scoped API routes.
+- Restricted credential-bearing requests to the configured HTTPS origin and API
+  root, with only an explicit loopback HTTP development exception; redirects,
+  cookies, ambiguous paths, query/fragment injection, and oversized bodies are
+  rejected.
+- Added bounded streaming response reads, strict media-type/framing checks, and a
+  duplicate-key-rejecting JSON parser with depth, node, collection, string, and
+  numeric limits.
+- Bound every authoritative response to the requested license, product, device,
+  activation, status, and timestamps before updating SDK state.
+- Hardened signed offline verification across envelope shape, canonical bytes,
+  Ed25519 key/signature encoding, key ID, visible/signed claim equality, identity,
+  entitlement, lifetime, clock rollback, and local grace policy.
+- Removed cached validation and cached signing keys as independent roots of
+  authority. Offline use now requires an enabled positive local window and an
+  explicitly trusted or authenticated signing key.
+- Added generation-based lifecycle guards so stale asynchronous work cannot
+  restore authority after reset, deactivation, destruction, or a newer result.
+- Bounded cache, configuration, telemetry, event, and logging inputs; sensitive
+  values are redacted from SDK-generated diagnostics.
+
+### Added
+
+- Added opt-in `browserHighEntropyTelemetryEnabled` collection for the bounded UA
+  Client Hints fields `platformVersion`, `architecture`, and `model`. Collection
+  is nonblocking, fail-soft, in-memory only, and remains disabled by default.
+- Added adversarial regression suites for transport confusion, redirects,
+  response framing, strict JSON, cache/key substitution, offline signatures,
+  clock rollback, retries, lifecycle races, timers, destruction, telemetry, and
+  package entrypoints.
+
+### Changed
+
+- Configuration is normalized and frozen; unknown keys, getters/accessors,
+  non-plain objects, unsafe Unicode/control text, insecure production HTTP, and
+  out-of-range limits now fail closed.
+- `maxOfflineDays: 0` consistently disables offline authority instead of acting
+  as an unlimited window.
+- Cached online validation no longer grants authority during startup; callers
+  must wait for online revalidation or successful signed-offline verification.
+- Explicit redirects are refused, and unsafe mutations are not automatically
+  replayed.
+- Node.js 18 or newer is required, package exports point at built JavaScript and
+  declarations, and lint/type/build/package validation now runs in CI.
+
+---
+
+## [0.4.3] - 2026-02-25
+
+### Added
+
+- Added the `LicenseSeatSDK.VERSION` static property.
+
+### Fixed
+
+- Included telemetry when `getOfflineToken()` is called without options.
+
+---
+
+## [0.4.2] - 2026-02-25
+
+### Changed
+
+- Emit `heartbeat:cycle` immediately when the heartbeat timer starts.
+- Do not start the heartbeat timer without a configured product slug.
+- Validate the SDK version in tests with a semantic-version expression.
+
+---
+
 ## [0.4.1] - 2026-02-09
 
 ### Changed

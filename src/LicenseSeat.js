@@ -58,7 +58,7 @@ import {
  * SDK version constant
  * @type {string}
  */
-export const SDK_VERSION = "0.4.3";
+export const SDK_VERSION = "0.5.0";
 
 /**
  * Default configuration values

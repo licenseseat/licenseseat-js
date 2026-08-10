@@ -5,8 +5,13 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { readFileSync } from "node:fs";
 import { LicenseSeatSDK, SDK_VERSION } from "../src/LicenseSeat.js";
 import { mockData } from "./mocks/handlers.js";
+
+const packageVersion = JSON.parse(
+  readFileSync("package.json", "utf8"),
+).version;
 
 describe("LicenseSeatSDK", () => {
   let sdk;
@@ -710,6 +715,7 @@ describe("LicenseSeatSDK", () => {
       expect(SDK_VERSION).toBeDefined();
       expect(typeof SDK_VERSION).toBe("string");
       expect(SDK_VERSION).toMatch(/^\d+\.\d+\.\d+$/); // semver format
+      expect(SDK_VERSION).toBe(packageVersion);
     });
   });
 });
