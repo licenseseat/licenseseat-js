@@ -413,6 +413,17 @@ describe("offline-token trust boundary", () => {
     const envelope = validateOfflineEnvelope(offlineToken(claims));
     expect(() => validateOfflineClaims(envelope, { ...OFFLINE_CONTEXT, ...context })).toThrow(message);
   });
+
+  // Validity windows are half-open [nbf, exp): nbf == exp is never valid, even
+  // inside the clock-skew allowance (license_seat #16, cross-SDK contract).
+  it("rejects a zero-width validity window (nbf == exp)", () => {
+    const now = Math.floor(NOW / 1000);
+    const zeroWidth = validateOfflineEnvelope(offlineToken({ iat: now, nbf: now + 60, exp: now + 60 }));
+    expect(() => validateOfflineClaims(zeroWidth, OFFLINE_CONTEXT)).toThrow("time claims are inconsistent");
+
+    const oneSecond = validateOfflineEnvelope(offlineToken({ iat: now, nbf: now + 59, exp: now + 60 }));
+    expect(validateOfflineClaims(oneSecond, OFFLINE_CONTEXT).valid).toBe(true);
+  });
 });
 
 describe("bounded API parsing and redaction", () => {
