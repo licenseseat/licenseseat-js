@@ -121,6 +121,24 @@ function apiErrorCode(data) {
     : null;
 }
 
+/**
+ * Server verdicts that the license does not cover this use. Not revocations (the
+ * signed grant is kept), but no offline grant may override them until an online
+ * validation succeeds again. Same set as licenseseat-swift's
+ * APIError.isAuthoritativeDenial.
+ */
+const AUTHORITATIVE_DENIAL_CODES = new Set([
+  "version_not_entitled",
+  "not_entitled",
+  "product_mismatch",
+  "floating_not_implemented",
+  "named_user_not_implemented",
+]);
+
+function isAuthoritativeDenialCode(code) {
+  return typeof code === "string" && AUTHORITATIVE_DENIAL_CODES.has(code.toLowerCase());
+}
+
 function safeErrorMessage(value, fallback = "Request failed") {
   if (typeof value !== "string" || value.length === 0) return fallback;
   return new TextDecoder().decode(new TextEncoder().encode(value))
@@ -1547,6 +1565,15 @@ export class LicenseSeatSDK {
     const identity = this.currentLicense || this.loadCachedIdentity();
     if (!identity || !this.config.productSlug) {
       return { valid: false, offline: true, code: "no_license" };
+    }
+    const recorded = this.cache.getLicense()?.validation;
+    if (isRecord(recorded) && recorded.valid === false && isAuthoritativeDenialCode(recorded.code)) {
+      return {
+        valid: false,
+        offline: true,
+        code: recorded.code.toLowerCase(),
+        message: "The server denied this license; offline authority cannot override it until an online validation succeeds",
+      };
     }
     try {
       const envelope = validateOfflineEnvelope(signed);

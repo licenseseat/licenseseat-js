@@ -6,6 +6,18 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [Unreleased]
+
+### Security
+
+- An authoritative server denial (`version_not_entitled`, `not_entitled`,
+  `product_mismatch`, `floating_not_implemented`, `named_user_not_implemented`,
+  any letter case, as `valid: false` or as an HTTP error) is no longer overridden
+  by the cached offline token after a later outage or a reload. The denial already
+  persisted as the cached validation; offline verification now honours it first.
+  The token is kept (a denial is not a revocation), and the next successful online
+  validation clears the denial. Matches licenseseat-swift #26.
+
 ## [0.5.0] - 2026-08-10
 
 ### Security
