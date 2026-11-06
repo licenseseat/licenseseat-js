@@ -644,7 +644,7 @@ export function validateOfflineClaims(envelope, context) {
       throw new TypeError(`Offline token ${name} claim is invalid`);
     }
   }
-  if (!(token.iat <= token.nbf && token.nbf <= token.exp)) {
+  if (!(token.iat <= token.nbf && token.nbf < token.exp)) {
     throw new TypeError("Offline token time claims are inconsistent");
   }
   if (token.exp - token.iat > MAX_TOKEN_LIFETIME_SECONDS) {

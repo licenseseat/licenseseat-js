@@ -6,6 +6,15 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [Unreleased]
+
+### Security
+
+- Offline tokens with a zero-width validity window (`nbf == exp`) are rejected.
+  Windows are half-open `[nbf, exp)`; such a token was previously accepted when
+  `nbf` fell inside the clock-skew allowance. Matches the Swift, Rust and C++ SDKs
+  and the server (#16).
+
 ## [0.5.0] - 2026-08-10
 
 ### Security
