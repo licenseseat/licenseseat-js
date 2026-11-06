@@ -676,6 +676,7 @@ export class LicenseSeatSDK {
       if (stateIsCurrent) {
         this.cache.updateValidation(response);
         this.trustedValidation = response;
+        if (!response.valid) this.retireOfflineGrantIfDenialUnpersisted(response.code);
       }
 
       if (response.valid) {
@@ -746,6 +747,7 @@ export class LicenseSeatSDK {
             code: errorCode,
             message: errorMessage,
           });
+          this.retireOfflineGrantIfDenialUnpersisted(errorCode);
         }
         this.revokeTrustedAuthorization(this.isRevocationError(error));
         if (this.isRevocationError(error)) {
@@ -1561,6 +1563,20 @@ export class LicenseSeatSDK {
    * @returns {Promise<import('./types.js').ValidationResult>}
    * @private
    */
+  /**
+   * An authoritative denial that could not be written to storage must not let a
+   * reload revive the cached offline grant, so the token is retired instead.
+   * @param {string|undefined|null} code
+   * @private
+   */
+  retireOfflineGrantIfDenialUnpersisted(code) {
+    if (!isAuthoritativeDenialCode(code)) return;
+    const recorded = this.cache.getLicense()?.validation;
+    if (!(isRecord(recorded) && recorded.valid === false && isAuthoritativeDenialCode(recorded.code))) {
+      this.cache.clearOfflineToken();
+    }
+  }
+
   async verifyCachedOfflineEnvelope(signed) {
     const identity = this.currentLicense || this.loadCachedIdentity();
     if (!identity || !this.config.productSlug) {

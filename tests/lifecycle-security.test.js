@@ -203,6 +203,16 @@ describe("SDK lifecycle security", () => {
     });
   });
 
+  it("retires the offline token when a denial cannot be persisted", async () => {
+    const instance = await prepareOffline("denial_unpersisted_");
+    vi.spyOn(instance.cache, "setLicense").mockImplementation(() => {});
+    server.use(http.post(`${API_BASE}/products/:slug/licenses/validate`, () =>
+      HttpResponse.json({ object: "validation_result", valid: false, code: "not_entitled", message: "Denied" })
+    ));
+    await instance.validateLicense(mockData.validLicenseKey);
+    expect(instance.cache.getOfflineToken()).toBeNull();
+  });
+
   it("keeps the offline fallback after an unrelated invalid result", async () => {
     const instance = await prepareOffline("non_denial_");
     server.use(http.post(`${API_BASE}/products/:slug/licenses/validate`, () =>
