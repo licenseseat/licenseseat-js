@@ -139,6 +139,23 @@ function isAuthoritativeDenialCode(code) {
   return typeof code === "string" && AUTHORITATIVE_DENIAL_CODES.has(code.toLowerCase());
 }
 
+/** A recorded validation that is an authoritative denial. */
+function isAuthoritativeDenial(validation) {
+  return isRecord(validation) && validation.valid === false &&
+    isAuthoritativeDenialCode(validation.code);
+}
+
+const REVOCATION_CODES = new Set([
+  "revoked",
+  "license_revoked",
+  "suspended",
+  "license_suspended",
+  "expired",
+  "license_expired",
+  "not_active",
+  "license_not_active",
+]);
+
 function safeErrorMessage(value, fallback = "Request failed") {
   if (typeof value !== "string" || value.length === 0) return fallback;
   return new TextDecoder().decode(new TextEncoder().encode(value))
@@ -295,6 +312,13 @@ export class LicenseSeatSDK {
     /** @type {import('./types.js').ValidationResult|null} */
     this.trustedValidation = null;
 
+    /**
+     * Authoritative denial received by this instance. Holds even if storage
+     * could not record it; lifted only by an online validation success.
+     * @type {import('./types.js').ValidationResult|null}
+     */
+    this.denialLatch = null;
+
     /** @type {Map<string, string>} */
     this.trustedPublicKeys = new Map(Object.entries(this.config.signingPublicKeys));
 
@@ -368,7 +392,10 @@ export class LicenseSeatSDK {
           .then((offlineResult) => {
             if (offlineResult) {
               if (this.destroyed || this.currentLicense !== cachedLicense) return;
-              this.cache.updateValidation(offlineResult);
+              // Re-check synchronously with the commit: a denial recorded while
+              // the signature was being verified wins.
+              offlineResult = this.denyOfflineResultIfDenied(offlineResult);
+              this.recordValidation(offlineResult);
               this.trustedValidation = offlineResult.valid ? offlineResult : null;
               if (offlineResult.valid) {
                 this.recordTrustedTime(Date.now());
@@ -674,7 +701,9 @@ export class LicenseSeatSDK {
       }
 
       if (stateIsCurrent) {
-        this.cache.updateValidation(response);
+        if (response.valid) this.denialLatch = null;
+        else if (isAuthoritativeDenialCode(response.code)) this.denialLatch = response;
+        this.recordValidation(response);
         this.trustedValidation = response;
         if (!response.valid) this.retireOfflineGrantIfDenialUnpersisted(response.code);
       }
@@ -688,7 +717,11 @@ export class LicenseSeatSDK {
         }
       } else {
         this.emit("validation:failed", response);
-        if (stateIsCurrent) this.revokeTrustedAuthorization(false);
+        // A valid:false revocation retires the offline grant exactly like the
+        // HTTP-error form does.
+        if (stateIsCurrent) {
+          this.revokeTrustedAuthorization(REVOCATION_CODES.has(response.code));
+        }
       }
 
       return response;
@@ -696,9 +729,13 @@ export class LicenseSeatSDK {
       this.emit("validation:error", { licenseKey, error });
 
       const isNetworkFailure = error instanceof APIError && [0, 408].includes(error.status);
+      // A received denial is the decision whatever its HTTP status (even 408):
+      // classify it before considering any offline fallback.
+      const isDenial = error instanceof APIError && isRecord(error.data) &&
+        isAuthoritativeDenialCode(apiErrorCode(error.data));
 
-      if (this.config.offlineFallbackEnabled && isNetworkFailure && validatesCurrent) {
-        const offlineResult = await this.verifyCachedOffline();
+      if (this.config.offlineFallbackEnabled && isNetworkFailure && !isDenial && validatesCurrent) {
+        let offlineResult = await this.verifyCachedOffline();
 
         const stateIsCurrent =
           !this.destroyed &&
@@ -707,7 +744,8 @@ export class LicenseSeatSDK {
           this.currentLicense &&
           constantTimeEqual(this.currentLicense.license_key, licenseKey);
         if (stateIsCurrent) {
-          this.cache.updateValidation(offlineResult);
+          offlineResult = this.denyOfflineResultIfDenied(offlineResult);
+          this.recordValidation(offlineResult);
           this.trustedValidation = offlineResult.valid ? offlineResult : null;
           if (offlineResult.valid) this.recordTrustedTime(Date.now());
         } else {
@@ -742,11 +780,9 @@ export class LicenseSeatSDK {
             nestedMessage ?? error.data.message,
             "Validation failed"
           );
-          this.cache.updateValidation({
-            valid: false,
-            code: errorCode,
-            message: errorMessage,
-          });
+          const failure = { valid: false, code: errorCode, message: errorMessage };
+          if (isAuthoritativeDenialCode(errorCode)) this.denialLatch = failure;
+          this.recordValidation(failure);
           this.retireOfflineGrantIfDenialUnpersisted(errorCode);
         }
         this.revokeTrustedAuthorization(this.isRevocationError(error));
@@ -1178,6 +1214,7 @@ export class LicenseSeatSDK {
     this.cache.clear();
     this.currentLicense = null;
     this.trustedValidation = null;
+    this.denialLatch = null;
     this.trustedPublicKeys = new Map(Object.entries(this.config.signingPublicKeys));
     this.lastOfflineValidation = null;
     this.currentAutoLicenseKey = null;
@@ -1556,14 +1593,6 @@ export class LicenseSeatSDK {
   }
 
   /**
-   * Verify a cached envelope without using localStorage as a signing-key trust
-   * anchor. A key must have been pinned in configuration or fetched over the
-   * hardened transport during this SDK instance's lifetime.
-   * @param {*} signed
-   * @returns {Promise<import('./types.js').ValidationResult>}
-   * @private
-   */
-  /**
    * An authoritative denial that could not be written to storage must not let a
    * reload revive the cached offline grant, so the token is retired instead.
    * @param {string|undefined|null} code
@@ -1571,26 +1600,76 @@ export class LicenseSeatSDK {
    */
   retireOfflineGrantIfDenialUnpersisted(code) {
     if (!isAuthoritativeDenialCode(code)) return;
-    const recorded = this.cache.getLicense()?.validation;
-    if (!(isRecord(recorded) && recorded.valid === false && isAuthoritativeDenialCode(recorded.code))) {
+    if (!isAuthoritativeDenial(this.cache.getLicense()?.validation)) {
       this.cache.clearOfflineToken();
     }
   }
 
+  /**
+   * The authoritative denial in force: this instance's latch, else the
+   * persisted decision (which another instance sharing storage may have written).
+   * Only an online validation success (or clearing the license) lifts it.
+   * @returns {import('./types.js').ValidationResult|null}
+   * @private
+   */
+  authoritativeDenial() {
+    if (this.denialLatch) return this.denialLatch;
+    const recorded = this.cache.getLicense()?.validation;
+    return isAuthoritativeDenial(recorded) ? recorded : null;
+  }
+
+  /**
+   * Replace a would-be offline grant with the denial in force, if any.
+   * @param {import('./types.js').ValidationResult} result
+   * @returns {import('./types.js').ValidationResult}
+   * @private
+   */
+  denyOfflineResultIfDenied(result) {
+    if (!result || !result.valid) return result;
+    const denial = this.authoritativeDenial();
+    if (!denial) return result;
+    return {
+      valid: false,
+      offline: true,
+      code: denial.code.toLowerCase(),
+      message: "The server denied this license; offline authority cannot override it until an online validation succeeds",
+    };
+  }
+
+  /**
+   * Persist a validation result without letting a failure that is neither a
+   * denial nor a revocation (a 5xx, an unrelated invalid result, an offline
+   * failure) erase a recorded authoritative denial.
+   * @param {import('./types.js').ValidationResult} result
+   * @private
+   */
+  recordValidation(result) {
+    if (
+      !result?.valid &&
+      !isAuthoritativeDenialCode(result?.code) &&
+      !REVOCATION_CODES.has(result?.code) &&
+      isAuthoritativeDenial(this.cache.getLicense()?.validation)
+    ) {
+      return;
+    }
+    this.cache.updateValidation(result);
+  }
+
+  /**
+   * Verify a cached envelope without using localStorage as a signing-key trust
+   * anchor. A key must have been pinned in configuration or fetched over the
+   * hardened transport during this SDK instance's lifetime.
+   * @param {*} signed
+   * @returns {Promise<import('./types.js').ValidationResult>}
+   * @private
+   */
   async verifyCachedOfflineEnvelope(signed) {
     const identity = this.currentLicense || this.loadCachedIdentity();
     if (!identity || !this.config.productSlug) {
       return { valid: false, offline: true, code: "no_license" };
     }
-    const recorded = this.cache.getLicense()?.validation;
-    if (isRecord(recorded) && recorded.valid === false && isAuthoritativeDenialCode(recorded.code)) {
-      return {
-        valid: false,
-        offline: true,
-        code: recorded.code.toLowerCase(),
-        message: "The server denied this license; offline authority cannot override it until an online validation succeeds",
-      };
-    }
+    const denied = this.denyOfflineResultIfDenied({ valid: true });
+    if (!denied.valid) return denied;
     try {
       const envelope = validateOfflineEnvelope(signed);
       const publicKey = await this.resolveTrustedSigningKey(
@@ -1616,7 +1695,9 @@ export class LicenseSeatSDK {
         maxClockSkewMs: this.config.maxClockSkewMs,
         maxOfflineDays: this.config.maxOfflineDays,
       });
-      return result;
+      // Signature verification is asynchronous: a denial recorded meanwhile
+      // (by this or another instance) wins over this result.
+      return this.denyOfflineResultIfDenied(result);
     } catch (error) {
       this.log("Offline verification failed:", error);
       return {
@@ -2083,6 +2164,7 @@ export class LicenseSeatSDK {
     this.cache.clear();
     this.currentLicense = null;
     this.trustedValidation = null;
+    this.denialLatch = null;
     this.trustedPublicKeys = new Map(
       Object.entries(this.config.signingPublicKeys)
     );
@@ -2095,17 +2177,7 @@ export class LicenseSeatSDK {
    */
   isRevocationError(error) {
     if (!(error instanceof APIError)) return false;
-    const code = apiErrorCode(error.data);
-    return [
-      "revoked",
-      "license_revoked",
-      "suspended",
-      "license_suspended",
-      "expired",
-      "license_expired",
-      "not_active",
-      "license_not_active",
-    ].includes(code);
+    return REVOCATION_CODES.has(apiErrorCode(error.data));
   }
 
   /**

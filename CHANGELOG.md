@@ -17,6 +17,16 @@ This project follows [Semantic Versioning](https://semver.org/).
   persisted as the cached validation; offline verification now honours it first.
   The token is kept (a denial is not a revocation), and the next successful online
   validation clears the denial. Matches licenseseat-swift #26.
+- The recorded denial is no longer erased by a later failure that is neither a
+  denial nor a revocation (an HTTP 503, an unrelated `valid: false`, an offline
+  failure). A denial carried by an HTTP 408 is classified before the offline
+  fallback is considered (a plain 408 still falls back). Each instance also latches
+  the denial in memory, and a denial recorded while offline signature verification
+  is in flight (by the same or another instance sharing storage) wins over that
+  verification's result.
+- A `valid: false` revocation (`revoked`, `suspended`, `expired`, `not_active` and
+  their `license_` forms) now clears the cached offline token, as the HTTP-error
+  form already did.
 
 ## [0.5.0] - 2026-08-10
 

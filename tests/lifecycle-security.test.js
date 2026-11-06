@@ -213,6 +213,121 @@ describe("SDK lifecycle security", () => {
     expect(instance.cache.getOfflineToken()).toBeNull();
   });
 
+  // Codex round 1 on #18.
+  const VALIDATE = `${API_BASE}/products/:slug/licenses/validate`;
+  const deny = (code = "not_entitled") => () =>
+    HttpResponse.json({ object: "validation_result", valid: false, code, message: "Denied" });
+  const outage = () => HttpResponse.error();
+
+  it.each([
+    ["an HTTP 503", () =>
+      HttpResponse.json({ error: { code: "service_unavailable", message: "Unavailable" } }, { status: 503 })],
+    ["an unrelated invalid result", deny("some_other_reason")],
+  ])("keeps a recorded denial through %s (item 1)", async (_label, laterHandler) => {
+    const instance = await prepareOffline(`denial_kept_${_label.replace(/\W/g, "_")}_`);
+    server.use(http.post(VALIDATE, deny()));
+    await instance.validateLicense(mockData.validLicenseKey);
+    server.use(http.post(VALIDATE, laterHandler));
+    await instance.validateLicense(mockData.validLicenseKey).catch(() => {});
+    expect(instance.cache.getLicense().validation).toMatchObject({ valid: false, code: "not_entitled" });
+    server.use(http.post(VALIDATE, outage));
+    const duringOutage = await instance.validateLicense(mockData.validLicenseKey).catch((error) => error);
+    expect(duringOutage?.valid).not.toBe(true);
+    expect(instance.hasEntitlement("pro")).toBe(false);
+  });
+
+  it("never falls back offline past a denial carried by an HTTP 408 (item 2)", async () => {
+    const instance = await prepareOffline("denial_408_");
+    server.use(http.post(VALIDATE, () =>
+      HttpResponse.json({ error: { code: "NOT_ENTITLED", message: "Denied" } }, { status: 408 })
+    ));
+    const result = await instance.validateLicense(mockData.validLicenseKey).catch((error) => error);
+    expect(result?.valid).not.toBe(true);
+    expect(result).toMatchObject({ status: 408 });
+    expect(instance.hasEntitlement("pro")).toBe(false);
+    expect(instance.cache.getLicense().validation).toMatchObject({ valid: false, code: "NOT_ENTITLED" });
+    // A plain 408 (no denial code) still falls back.
+    server.resetHandlers();
+    await instance.validateLicense(mockData.validLicenseKey);
+    server.use(http.post(VALIDATE, () =>
+      HttpResponse.json({ error: { code: "request_timeout", message: "Slow" } }, { status: 408 })
+    ));
+    await expect(instance.validateLicense(mockData.validLicenseKey)).resolves.toMatchObject({
+      valid: true,
+      offline: true,
+    });
+  });
+
+  it("lets a denial recorded during offline verification win (item 3)", async () => {
+    const instance = await prepareOffline("denial_inflight_");
+    const entered = deferred();
+    const gate = deferred();
+    const verify = instance.verifyOfflineToken.bind(instance);
+    instance.verifyOfflineToken = async (...args) => {
+      entered.resolve();
+      await gate.promise;
+      return verify(...args);
+    };
+    const pending = instance.verifyCachedOffline();
+    await entered.promise;
+    server.use(http.post(VALIDATE, deny()));
+    instance.verifyOfflineToken = verify;
+    await instance.validateLicense(mockData.validLicenseKey);
+    gate.resolve();
+    await expect(pending).resolves.toMatchObject({ valid: false, code: "not_entitled" });
+  });
+
+  it("does not let a reload's in-flight offline restore overwrite a newer denial (item 3)", async () => {
+    const prefix = "denial_reload_race_";
+    const instance = await prepareOffline(prefix);
+    instance.destroy();
+    const verify = LicenseSeatSDK.prototype.verifyOfflineToken;
+    const entered = deferred();
+    const gate = deferred();
+    vi.spyOn(LicenseSeatSDK.prototype, "verifyOfflineToken").mockImplementation(async function (...args) {
+      entered.resolve();
+      await gate.promise;
+      return verify.apply(this, args);
+    });
+    const reloaded = create({
+      apiKey: null,
+      storagePrefix: prefix,
+      autoInitialize: true,
+      offlineFallbackEnabled: true,
+      maxOfflineDays: 30,
+      signingPublicKeys: { [mockData.keyId]: mockData.publicKey },
+    });
+    await entered.promise;
+    // Another instance (e.g. another tab) records the denial meanwhile.
+    vi.mocked(LicenseSeatSDK.prototype.verifyOfflineToken).mockRestore();
+    const other = create({
+      storagePrefix: prefix,
+      offlineFallbackEnabled: true,
+      maxOfflineDays: 30,
+      signingPublicKeys: { [mockData.keyId]: mockData.publicKey },
+    });
+    server.use(http.post(VALIDATE, deny()));
+    await other.validateLicense(mockData.validLicenseKey);
+    gate.resolve();
+    await vi.waitFor(() => expect(reloaded.lastOfflineValidation).toBeTruthy());
+    expect(reloaded.lastOfflineValidation).toMatchObject({ valid: false, code: "not_entitled" });
+    expect(reloaded.hasEntitlement("pro")).toBe(false);
+    expect(reloaded.cache.getLicense().validation).toMatchObject({ valid: false, code: "not_entitled" });
+  });
+
+  it.each(["revoked", "suspended"])(
+    "clears the offline token on a valid:false %s response (item 4)",
+    async (code) => {
+      const instance = await prepareOffline(`valid_false_${code}_`);
+      server.use(http.post(VALIDATE, deny(code)));
+      await instance.validateLicense(mockData.validLicenseKey);
+      expect(instance.cache.getOfflineToken()).toBeNull();
+      server.use(http.post(VALIDATE, outage));
+      const duringOutage = await instance.validateLicense(mockData.validLicenseKey).catch((error) => error);
+      expect(duringOutage?.valid).not.toBe(true);
+    }
+  );
+
   it("keeps the offline fallback after an unrelated invalid result", async () => {
     const instance = await prepareOffline("non_denial_");
     server.use(http.post(`${API_BASE}/products/:slug/licenses/validate`, () =>
