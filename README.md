@@ -660,7 +660,7 @@ Telemetry is **enabled by default** and can be disabled at any time.
 | Field                | Type     | Example                | Description                                      |
 | -------------------- | -------- | ---------------------- | ------------------------------------------------ |
 | `sdk_name`           | `string` | `"js"`                 | Always `"js"` for this SDK                       |
-| `sdk_version`        | `string` | `"0.5.0"`              | SDK version                                      |
+| `sdk_version`        | `string` | `"0.5.1"`              | SDK version                                      |
 | `os_name`            | `string` | `"macOS"`              | Operating system name                            |
 | `os_version`         | `string` | `"14.2.1"`             | Operating system version                         |
 | `platform`           | `string` | `"browser"`            | Runtime platform (`browser`, `node`, `electron`, `react-native`, `deno`, `bun`) |
@@ -1160,7 +1160,7 @@ Once published to npm, the package is automatically available on CDNs:
 **Version pinning** (recommended for production):
 ```html
 <script type="module">
-  import LicenseSeat from 'https://esm.sh/@licenseseat/js@0.5.0';
+  import LicenseSeat from 'https://esm.sh/@licenseseat/js@0.5.1';
 </script>
 ```
 

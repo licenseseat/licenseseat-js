@@ -8,6 +8,8 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-11-06
+
 ### Security
 
 - An authoritative server denial (`version_not_entitled`, `not_entitled`,
