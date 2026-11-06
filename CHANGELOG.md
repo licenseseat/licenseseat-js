@@ -24,6 +24,12 @@ This project follows [Semantic Versioning](https://semver.org/).
   the denial in memory, and a denial recorded while offline signature verification
   is in flight (by the same or another instance sharing storage) wins over that
   verification's result.
+- A denial carried by a retryable status (408, 429, 5xx) ends the retry loop and is
+  returned as the result, so later transient failures can no longer replace it and
+  reach the offline fallback. The in-memory denial is bound to the license key and
+  device it was received for (activating another key drops it), and an online
+  success clears the persisted denial first as its own small write; if storage
+  cannot take even that, the session keeps an in-memory online-valid override.
 - A `valid: false` revocation (`revoked`, `suspended`, `expired`, `not_active` and
   their `license_` forms) now clears the cached offline token, as the HTTP-error
   form already did.

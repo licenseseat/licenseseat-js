@@ -13,6 +13,11 @@ import { server } from "./mocks/server.js";
 
 const API_BASE = "https://licenseseat.com/api/v1";
 
+function isDenialRecord(serialized) {
+  const validation = serialized ? JSON.parse(serialized).validation : null;
+  return Boolean(validation && validation.valid === false && validation.code === "not_entitled");
+}
+
 function deferred() {
   let resolve;
   const promise = new Promise((resolvePromise) => {
@@ -42,12 +47,13 @@ describe("SDK lifecycle security", () => {
     return instance;
   }
 
-  async function prepareOffline(prefix = "offline_") {
+  async function prepareOffline(prefix = "offline_", overrides = {}) {
     const instance = create({
       storagePrefix: prefix,
       offlineFallbackEnabled: true,
       maxOfflineDays: 30,
       signingPublicKeys: { [mockData.keyId]: mockData.publicKey },
+      ...overrides,
     });
     await instance.activate(mockData.validLicenseKey, { deviceId: mockData.deviceId });
     await vi.waitFor(() => {
@@ -313,6 +319,98 @@ describe("SDK lifecycle security", () => {
     expect(reloaded.lastOfflineValidation).toMatchObject({ valid: false, code: "not_entitled" });
     expect(reloaded.hasEntitlement("pro")).toBe(false);
     expect(reloaded.cache.getLicense().validation).toMatchObject({ valid: false, code: "not_entitled" });
+  });
+
+  // Sol round 2 on #18.
+  it.each([408, 429, 503])(
+    "ends retries on a denial carried by HTTP %s and never falls back past it (r2 item 1)",
+    async (status) => {
+      const instance = await prepareOffline(`denial_retry_${status}_`, { maxRetries: 3, retryDelay: 0 });
+      let calls = 0;
+      server.use(http.post(VALIDATE, () => {
+        calls += 1;
+        if (calls === 1) {
+          return HttpResponse.json(
+            { error: { code: "NOT_ENTITLED", message: "Denied" } },
+            { status, headers: { "Retry-After": "0" } }
+          );
+        }
+        return HttpResponse.error();
+      }));
+      const result = await instance.validateLicense(mockData.validLicenseKey).catch((error) => error);
+      expect(calls).toBe(1);
+      expect(result?.valid).not.toBe(true);
+      expect(result).toMatchObject({ status });
+      expect(instance.hasEntitlement("pro")).toBe(false);
+      server.use(http.post(VALIDATE, outage));
+      const duringOutage = await instance.validateLicense(mockData.validLicenseKey).catch((error) => error);
+      expect(duringOutage?.valid).not.toBe(true);
+      expect(instance.hasEntitlement("pro")).toBe(false);
+    }
+  );
+
+  it("does not apply an old license's denial to a newly activated key (r2 item 2)", async () => {
+    const instance = await prepareOffline("denial_other_key_");
+    server.use(http.post(VALIDATE, deny()));
+    await instance.validateLicense(mockData.validLicenseKey);
+    server.resetHandlers();
+    const newKey = "LS-TEST-NEW-PAID-LICENSE";
+    await instance.activate(newKey, { deviceId: mockData.deviceId });
+    await vi.waitFor(() => {
+      expect(instance.syncingOfflineAssets).toBe(false);
+      expect(instance.cache.getOfflineToken()?.token.license_key).toBe(newKey);
+    });
+    server.use(http.post(VALIDATE, outage));
+    await expect(instance.validateLicense(newKey)).resolves.toMatchObject({ valid: true, offline: true });
+    expect(instance.hasEntitlement("pro")).toBe(true);
+  });
+
+  it("lifts the denial after an online success even when the full result cannot be cached (r2 item 3)", async () => {
+    const prefix = "denial_quota_";
+    const instance = await prepareOffline(prefix);
+    server.use(http.post(VALIDATE, deny()));
+    await instance.validateLicense(mockData.validLicenseKey);
+    // Storage is nearly full: the denial record fits, nothing larger does.
+    const limit = JSON.stringify(instance.cache.getLicense()).length;
+    const write = instance.cache.writeJson.bind(instance.cache);
+    vi.spyOn(instance.cache, "writeJson").mockImplementation((suffix, value) =>
+      suffix === "license" && JSON.stringify(value).length > limit ? false : write(suffix, value)
+    );
+    server.resetHandlers();
+    await expect(instance.validateLicense(mockData.validLicenseKey)).resolves.toMatchObject({ valid: true });
+    server.use(http.post(VALIDATE, outage));
+    await expect(instance.validateLicense(mockData.validLicenseKey)).resolves.toMatchObject({
+      valid: true,
+      offline: true,
+    });
+    expect(instance.hasEntitlement("pro")).toBe(true);
+    instance.destroy();
+    // The clear itself reached storage, so a reload is not locked out either.
+    expect(isDenialRecord(localStorage.getItem(`${prefix}license`))).toBe(false);
+  });
+
+  it("keeps an online-valid override for the session when the denial record cannot be cleared (r2 item 3)", async () => {
+    const instance = await prepareOffline("denial_unclearable_");
+    server.use(http.post(VALIDATE, deny()));
+    await instance.validateLicense(mockData.validLicenseKey);
+    const write = instance.cache.writeJson.bind(instance.cache);
+    vi.spyOn(instance.cache, "writeJson").mockImplementation((suffix, value) =>
+      suffix === "license" ? false : write(suffix, value)
+    );
+    server.resetHandlers();
+    await expect(instance.validateLicense(mockData.validLicenseKey)).resolves.toMatchObject({ valid: true });
+    expect(isDenialRecord(localStorage.getItem("denial_unclearable_license"))).toBe(true);
+    server.use(http.post(VALIDATE, outage));
+    await expect(instance.validateLicense(mockData.validLicenseKey)).resolves.toMatchObject({
+      valid: true,
+      offline: true,
+    });
+    // A new denial still takes over from the override.
+    server.use(http.post(VALIDATE, deny()));
+    await instance.validateLicense(mockData.validLicenseKey);
+    server.use(http.post(VALIDATE, outage));
+    const duringOutage = await instance.validateLicense(mockData.validLicenseKey).catch((error) => error);
+    expect(duringOutage?.valid).not.toBe(true);
   });
 
   it.each(["revoked", "suspended"])(

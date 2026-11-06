@@ -313,9 +313,12 @@ export class LicenseSeatSDK {
     this.trustedValidation = null;
 
     /**
-     * Authoritative denial received by this instance. Holds even if storage
-     * could not record it; lifted only by an online validation success.
-     * @type {import('./types.js').ValidationResult|null}
+     * This instance's denial decision, bound to the license key and device it
+     * was received for. `denial` is the authoritative denial (held even if
+     * storage could not record it; lifted only by an online validation
+     * success), or null for an "online-valid" override when an online success
+     * could not clear the persisted denial record.
+     * @type {{licenseKey: string, deviceId: string, denial: import('./types.js').ValidationResult|null}|null}
      */
     this.denialLatch = null;
 
@@ -540,6 +543,9 @@ export class LicenseSeatSDK {
         license: activation.license,
         active_entitlements: activation.license.active_entitlements,
       };
+      if (this.denialLatch && !this.latchMatches(this.denialLatch, licenseData)) {
+        this.denialLatch = null;
+      }
       this.cache.setLicense(licenseData);
       this.cache.updateValidation(this.trustedValidation);
       this.recordTrustedTime(Date.now());
@@ -701,8 +707,10 @@ export class LicenseSeatSDK {
       }
 
       if (stateIsCurrent) {
-        if (response.valid) this.denialLatch = null;
-        else if (isAuthoritativeDenialCode(response.code)) this.denialLatch = response;
+        if (response.valid) this.liftDenialAfterOnlineSuccess(licenseKey, fingerprint);
+        else if (isAuthoritativeDenialCode(response.code)) {
+          this.denialLatch = { licenseKey, deviceId: fingerprint, denial: response };
+        }
         this.recordValidation(response);
         this.trustedValidation = response;
         if (!response.valid) this.retireOfflineGrantIfDenialUnpersisted(response.code);
@@ -781,7 +789,9 @@ export class LicenseSeatSDK {
             "Validation failed"
           );
           const failure = { valid: false, code: errorCode, message: errorMessage };
-          if (isAuthoritativeDenialCode(errorCode)) this.denialLatch = failure;
+          if (isAuthoritativeDenialCode(errorCode)) {
+            this.denialLatch = { licenseKey, deviceId: fingerprint, denial: failure };
+          }
           this.recordValidation(failure);
           this.retireOfflineGrantIfDenialUnpersisted(errorCode);
         }
@@ -1613,9 +1623,48 @@ export class LicenseSeatSDK {
    * @private
    */
   authoritativeDenial() {
-    if (this.denialLatch) return this.denialLatch;
-    const recorded = this.cache.getLicense()?.validation;
-    return isAuthoritativeDenial(recorded) ? recorded : null;
+    const identity = this.currentLicense || this.loadCachedIdentity();
+    if (!identity) return null;
+    const latch = this.denialLatch;
+    if (latch && this.latchMatches(latch, identity)) return latch.denial;
+    const record = this.cache.getLicense();
+    return isAuthoritativeDenial(record?.validation) &&
+      typeof record.license_key === "string" &&
+      constantTimeEqual(record.license_key, identity.license_key)
+      ? record.validation
+      : null;
+  }
+
+  /**
+   * @param {{licenseKey: string, deviceId: string}} latch
+   * @param {{license_key: string, device_id: string}} identity
+   * @returns {boolean}
+   * @private
+   */
+  latchMatches(latch, identity) {
+    return constantTimeEqual(latch.licenseKey, identity.license_key) &&
+      constantTimeEqual(latch.deviceId, identity.device_id);
+  }
+
+  /**
+   * An online validation success lifts the denial. The persisted denial is
+   * cleared first as its own small write, so a full storage that cannot hold
+   * the larger success response still loses the denial; if even that write
+   * fails, an in-memory override keeps this session from honouring the stale
+   * record.
+   * @param {string} licenseKey
+   * @param {string} deviceId
+   * @private
+   */
+  liftDenialAfterOnlineSuccess(licenseKey, deviceId) {
+    this.denialLatch = null;
+    const record = this.cache.getLicense();
+    if (!record || !isAuthoritativeDenial(record.validation)) return;
+    const { validation: _denied, ...withoutDenial } = record;
+    this.cache.setLicense(withoutDenial);
+    if (isAuthoritativeDenial(this.cache.getLicense()?.validation)) {
+      this.denialLatch = { licenseKey, deviceId, denial: null };
+    }
   }
 
   /**
@@ -1985,6 +2034,12 @@ export class LicenseSeatSDK {
   shouldRetryError(error) {
     if (error instanceof APIError) {
       const status = error.status;
+
+      // A denial is the server's decision whatever the status (408, 429,
+      // 5xx): retrying could only replace it with a transient failure.
+      if (isRecord(error.data) && isAuthoritativeDenialCode(apiErrorCode(error.data))) {
+        return false;
+      }
 
       if (status >= 500 && status < 600 && status !== 501) {
         return true;
