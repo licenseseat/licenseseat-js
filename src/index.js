@@ -5,7 +5,7 @@
  * for apps, games, and plugins.
  *
  * @module @licenseseat/js
- * @version 0.5.0
+ * @version 0.5.1
  *
  * @example
  * ```js
